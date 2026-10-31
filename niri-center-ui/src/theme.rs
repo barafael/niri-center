@@ -192,13 +192,15 @@ pub const HIGH_CONTRAST_LIGHT: Colors = Colors {
 
 pub const ALL: [&Colors; 4] = [&DARK, &LIGHT, &HIGH_CONTRAST_DARK, &HIGH_CONTRAST_LIGHT];
 
-/// `a` moved `t` (0–1) of the way towards `b`.
-pub fn mix(a: Color, b: Color, t: f32) -> Color {
-    Color::from_rgb(
-        (b.r - a.r).mul_add(t, a.r),
-        (b.g - a.g).mul_add(t, a.g),
-        (b.b - a.b).mul_add(t, a.b),
-    )
+/// `from` moved `amount` (0–1) of the way towards `to`, alpha too.
+pub fn mix(from: Color, to: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    Color {
+        r: (to.r - from.r).mul_add(amount, from.r),
+        g: (to.g - from.g).mul_add(amount, from.g),
+        b: (to.b - from.b).mul_add(amount, from.b),
+        a: (to.a - from.a).mul_add(amount, from.a),
+    }
 }
 
 /// WCAG 2.x contrast between two colors, 1 to 21.
@@ -216,18 +218,23 @@ pub fn contrast(foreground: Color, background: Color) -> f32 {
             0.7152f32.mul_add(channel(color.g), 0.0722 * channel(color.b)),
         )
     }
-    let (a, b) = (luminance(foreground), luminance(background));
-    let (lighter, darker) = if a > b { (a, b) } else { (b, a) };
+    let (foreground_luminance, background_luminance) =
+        (luminance(foreground), luminance(background));
+    let (lighter, darker) = if foreground_luminance > background_luminance {
+        (foreground_luminance, background_luminance)
+    } else {
+        (background_luminance, foreground_luminance)
+    };
     (lighter + 0.05) / (darker + 0.05)
 }
 
 /// Whichever of the theme's text colors reads best on `fill`: for labels
 /// on shades drawn in canvases, where a fixed text color would not hold up.
-pub fn readable_on(c: &Colors, fill: Color) -> Color {
-    [c.text, c.on_accent, c.background]
+pub fn readable_on(colors: &Colors, fill: Color) -> Color {
+    [colors.text, colors.on_accent, colors.background]
         .into_iter()
-        .max_by(|a, b| contrast(*a, fill).total_cmp(&contrast(*b, fill)))
-        .unwrap_or(c.text)
+        .max_by(|first, second| contrast(*first, fill).total_cmp(&contrast(*second, fill)))
+        .unwrap_or(colors.text)
 }
 
 /// The colors for the desktop's color scheme (dark when unknown) and its
@@ -264,45 +271,45 @@ pub fn for_mode(mode: Option<Mode>, high_contrast: bool) -> Theme {
 /// in `edge`; menus and pick lists fill with `control`. iced draws field
 /// and pick list placeholders in `secondary`, so that is the muted text
 /// color: our own buttons do not use it.
-pub fn extended(c: &Colors) -> palette::Extended {
+pub fn extended(colors: &Colors) -> palette::Extended {
     let pair = |color, text| Pair { color, text };
     palette::Extended {
         background: palette::Background {
-            base: pair(c.background, c.text),
-            weakest: pair(c.surface, c.text),
-            weaker: pair(c.surface, c.text),
-            weak: pair(c.control, c.text),
-            neutral: pair(c.control_hover, c.text),
-            strong: pair(c.edge, c.background),
-            stronger: pair(c.edge, c.background),
-            strongest: pair(c.text, c.background),
+            base: pair(colors.background, colors.text),
+            weakest: pair(colors.surface, colors.text),
+            weaker: pair(colors.surface, colors.text),
+            weak: pair(colors.control, colors.text),
+            neutral: pair(colors.control_hover, colors.text),
+            strong: pair(colors.edge, colors.background),
+            stronger: pair(colors.edge, colors.background),
+            strongest: pair(colors.text, colors.background),
         },
         primary: palette::Primary {
-            base: pair(c.accent, c.on_accent),
-            weak: pair(mix(c.accent, c.background, 0.6), c.text),
-            strong: pair(mix(c.accent, c.text, 0.25), c.on_accent),
+            base: pair(colors.accent, colors.on_accent),
+            weak: pair(mix(colors.accent, colors.background, 0.6), colors.text),
+            strong: pair(mix(colors.accent, colors.text, 0.25), colors.on_accent),
         },
         secondary: palette::Secondary {
-            base: pair(c.muted, c.background),
-            weak: pair(c.muted, c.background),
-            strong: pair(c.muted, c.background),
+            base: pair(colors.muted, colors.background),
+            weak: pair(colors.muted, colors.background),
+            strong: pair(colors.muted, colors.background),
         },
         success: palette::Success {
-            base: pair(c.success, c.on_accent),
-            weak: pair(mix(c.success, c.background, 0.6), c.text),
-            strong: pair(c.success, c.on_accent),
+            base: pair(colors.success, colors.on_accent),
+            weak: pair(mix(colors.success, colors.background, 0.6), colors.text),
+            strong: pair(colors.success, colors.on_accent),
         },
         warning: palette::Warning {
-            base: pair(c.pending, c.on_accent),
-            weak: pair(mix(c.pending, c.background, 0.6), c.text),
-            strong: pair(c.pending, c.on_accent),
+            base: pair(colors.pending, colors.on_accent),
+            weak: pair(mix(colors.pending, colors.background, 0.6), colors.text),
+            strong: pair(colors.pending, colors.on_accent),
         },
         danger: palette::Danger {
-            base: pair(c.error, c.on_error),
-            weak: pair(mix(c.error, c.background, 0.6), c.text),
-            strong: pair(mix(c.error, c.text, 0.2), c.on_error),
+            base: pair(colors.error, colors.on_error),
+            weak: pair(mix(colors.error, colors.background, 0.6), colors.text),
+            strong: pair(mix(colors.error, colors.text, 0.2), colors.on_error),
         },
-        is_dark: c.dark,
+        is_dark: colors.dark,
     }
 }
 
@@ -332,19 +339,19 @@ fn with(color: fn(&Colors) -> Color) -> impl Fn(&Theme) -> text::Style {
 }
 
 pub fn muted(theme: &Theme) -> text::Style {
-    with(|c| c.muted)(theme)
+    with(|colors| colors.muted)(theme)
 }
 pub fn code(theme: &Theme) -> text::Style {
-    with(|c| c.code)(theme)
+    with(|colors| colors.code)(theme)
 }
 pub fn accent(theme: &Theme) -> text::Style {
-    with(|c| c.accent)(theme)
+    with(|colors| colors.accent)(theme)
 }
 pub fn pending(theme: &Theme) -> text::Style {
-    with(|c| c.pending)(theme)
+    with(|colors| colors.pending)(theme)
 }
 pub fn error(theme: &Theme) -> text::Style {
-    with(|c| c.error)(theme)
+    with(|colors| colors.error)(theme)
 }
 /// A shadow, on the desktop. In a browser with neither WebGPU nor WebGL the
 /// software renderer draws a blurred shadow as a solid slab, neither clips it to a
@@ -364,16 +371,16 @@ const fn lift(shadow: iced::Shadow) -> iced::Shadow {
 
 /// A group of setting rows: one card, edged, lifted off the page in light.
 pub fn group(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
-        background: Some(Background::Color(c.surface)),
+        background: Some(Background::Color(colors.surface)),
         border: Border {
-            color: c.line,
+            color: colors.line,
             width: 1.0,
             radius: 8.0.into(),
         },
         // light lifts cards off the page the way GNOME and KDE do
-        shadow: if c.dark {
+        shadow: if colors.dark {
             iced::Shadow::default()
         } else {
             lift(iced::Shadow {
@@ -388,11 +395,11 @@ pub fn group(theme: &Theme) -> container::Style {
 
 /// A row the latest change touched: tinted amber.
 pub fn changed_row(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
         background: Some(Background::Color(Color {
-            a: if c.dark { 0.12 } else { 0.14 },
-            ..c.pending
+            a: if colors.dark { 0.12 } else { 0.14 },
+            ..colors.pending
         })),
         ..container::Style::default()
     }
@@ -402,6 +409,35 @@ pub fn changed_row(theme: &Theme) -> container::Style {
 /// active window's border.
 pub fn changed_bar(theme: &Theme) -> container::Style {
     container::background(colors(theme).pending)
+}
+
+/// The card of a display change on trial: the popup surface, edged in
+/// niri's amber, raised off the page by a shadow.
+pub fn trial_card(theme: &Theme) -> container::Style {
+    let colors = colors(theme);
+    container::Style {
+        border: Border {
+            color: colors.pending,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, if colors.dark { 0.5 } else { 0.2 }),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..popup(theme)
+    }
+}
+
+/// The bar at the left edge of a setting the config sets: the accent,
+/// quieter than a change's amber.
+pub fn set_bar(theme: &Theme) -> container::Style {
+    let colors = colors(theme);
+    container::background(Color {
+        a: 0.7,
+        ..colors.accent
+    })
 }
 
 /// A line a change takes out, or the line niri cannot read.
@@ -415,9 +451,12 @@ pub fn removed_row(theme: &Theme) -> container::Style {
 /// Something that needs doing before anything else: niri cannot read
 /// the config.
 pub fn problem(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
-        background: Some(Background::Color(Color { a: 0.10, ..c.error })),
+        background: Some(Background::Color(Color {
+            a: 0.10,
+            ..colors.error
+        })),
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
@@ -436,16 +475,16 @@ pub fn added_row(theme: &Theme) -> container::Style {
 }
 
 pub fn success(theme: &Theme) -> text::Style {
-    with(|c| c.success)(theme)
+    with(|colors| colors.success)(theme)
 }
 
 /// Code and diagnostics: a recessed block.
 pub fn code_block(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
-        background: Some(Background::Color(c.canvas)),
+        background: Some(Background::Color(colors.canvas)),
         border: Border {
-            color: c.line,
+            color: colors.line,
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -457,11 +496,15 @@ pub fn code_block(theme: &Theme) -> container::Style {
 /// text color.
 pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
-        let c = colors(theme);
+        let colors = colors(theme);
         let (fill, ink) = match (chosen, status) {
-            (true, _) => (c.accent, c.on_accent),
-            (false, button::Status::Hovered | button::Status::Pressed) => (c.control_hover, c.text),
-            (false, button::Status::Active | button::Status::Disabled) => (c.control, c.text),
+            (true, _) => (colors.accent, colors.on_accent),
+            (false, button::Status::Hovered | button::Status::Pressed) => {
+                (colors.control_hover, colors.text)
+            }
+            (false, button::Status::Active | button::Status::Disabled) => {
+                (colors.control, colors.text)
+            }
         };
         button::Style {
             background: Some(Background::Color(fill)),
@@ -474,10 +517,10 @@ pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style
 
 /// The outline around a strip of segments.
 pub fn segments(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
         border: Border {
-            color: c.edge,
+            color: colors.edge,
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -488,22 +531,26 @@ pub fn segments(theme: &Theme) -> container::Style {
 /// A row in the history list; the open one is tinted with the accent.
 pub fn history_item(open: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
-        let c = colors(theme);
+        let colors = colors(theme);
         let background = match (open, status) {
             (true, _) => Some(Background::Color(Color {
-                a: if c.dark { 0.12 } else { 0.14 },
-                ..c.accent
+                a: if colors.dark { 0.12 } else { 0.14 },
+                ..colors.accent
             })),
             (false, button::Status::Hovered | button::Status::Pressed) => {
-                Some(Background::Color(c.control))
+                Some(Background::Color(colors.control))
             }
             (false, button::Status::Active | button::Status::Disabled) => None,
         };
         button::Style {
             background,
-            text_color: c.text,
+            text_color: colors.text,
             border: Border {
-                color: if open { c.accent } else { Color::TRANSPARENT },
+                color: if open {
+                    colors.accent
+                } else {
+                    Color::TRANSPARENT
+                },
                 width: if open { 1.0 } else { 0.0 },
                 radius: 6.0.into(),
             },
@@ -515,11 +562,11 @@ pub fn history_item(open: bool) -> impl Fn(&Theme, button::Status) -> button::St
 /// A toast: the surface, tinted and edged with the status color, raised
 /// off the page by a shadow.
 pub fn toast(theme: &Theme, tint: fn(&Colors) -> Color) -> container::Style {
-    let c = colors(theme);
-    let color = tint(c);
+    let colors = colors(theme);
+    let color = tint(colors);
     container::Style {
-        background: Some(Background::Color(mix(c.surface, color, 0.12))),
-        text_color: Some(c.text),
+        background: Some(Background::Color(mix(colors.surface, color, 0.12))),
+        text_color: Some(colors.text),
         border: Border {
             color,
             width: 1.0,
@@ -536,12 +583,12 @@ pub fn toast(theme: &Theme, tint: fn(&Colors) -> Color) -> container::Style {
 
 /// Tooltips and other things floating over the page.
 pub fn popup(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
-        background: Some(Background::Color(c.surface)),
-        text_color: Some(c.text),
+        background: Some(Background::Color(colors.surface)),
+        text_color: Some(colors.text),
         border: Border {
-            color: c.edge,
+            color: colors.edge,
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -551,10 +598,10 @@ pub fn popup(theme: &Theme) -> container::Style {
 
 /// The header search: an outlined box around an icon and a bare field.
 pub fn search_box(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
         border: Border {
-            color: c.edge,
+            color: colors.edge,
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -572,28 +619,38 @@ pub fn bare_input(theme: &Theme, status: text_input::Status) -> text_input::Styl
 }
 
 /// Scrollbars: a quiet scroller on no rail, brighter only while used.
+/// The thin bar of a column that scrolls on its own, beside other content.
+pub fn thin_scrollbar() -> iced::widget::scrollable::Scrollbar {
+    iced::widget::scrollable::Scrollbar::new()
+        .width(6)
+        .scroller_width(6)
+}
+
 pub fn scrollbar(
     theme: &Theme,
     status: iced::widget::scrollable::Status,
 ) -> iced::widget::scrollable::Style {
     use iced::widget::scrollable::{Rail, Scroller, Status, Style};
-    let c = colors(theme);
+    let colors = colors(theme);
+    // hidden until the pointer is over what scrolls, then faint, as GNOME
+    // and KDE draw theirs: a bar that always shows draws the eye to itself
+    let faint = mix(colors.line, colors.edge, 0.5);
     let (vertical, horizontal) = match status {
-        Status::Active { .. } => (mix(c.line, c.edge, 0.5), mix(c.line, c.edge, 0.5)),
+        Status::Active { .. } => (Color::TRANSPARENT, Color::TRANSPARENT),
         Status::Hovered {
             is_vertical_scrollbar_hovered,
             is_horizontal_scrollbar_hovered,
             ..
         } => (
             if is_vertical_scrollbar_hovered {
-                c.muted
+                colors.muted
             } else {
-                c.edge
+                faint
             },
             if is_horizontal_scrollbar_hovered {
-                c.muted
+                colors.muted
             } else {
-                c.edge
+                faint
             },
         ),
         Status::Dragged {
@@ -602,14 +659,14 @@ pub fn scrollbar(
             ..
         } => (
             if is_vertical_scrollbar_dragged {
-                c.text
+                colors.text
             } else {
-                c.edge
+                colors.edge
             },
             if is_horizontal_scrollbar_dragged {
-                c.text
+                colors.text
             } else {
-                c.edge
+                colors.edge
             },
         ),
     };
@@ -635,12 +692,12 @@ pub fn scrollbar(
 
 /// The band behind the search and the tabs, like a header bar.
 pub fn header_band(theme: &Theme) -> container::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     container::Style {
-        background: Some(Background::Color(if c.palette == Palette::Dark {
-            mix(c.background, c.surface, 0.5)
+        background: Some(Background::Color(if colors.palette == Palette::Dark {
+            mix(colors.background, colors.surface, 0.5)
         } else {
-            c.surface
+            colors.surface
         })),
         ..container::Style::default()
     }
@@ -653,13 +710,13 @@ pub fn hairline(theme: &Theme) -> container::Style {
 
 /// A text-only button in the accent color, for inline actions (Revert).
 pub fn link(theme: &Theme, status: button::Status) -> button::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     button::Style {
         background: None,
         text_color: match status {
-            button::Status::Hovered | button::Status::Pressed => c.text,
-            button::Status::Active => c.accent,
-            button::Status::Disabled => c.muted,
+            button::Status::Hovered | button::Status::Pressed => colors.text,
+            button::Status::Active => colors.accent,
+            button::Status::Disabled => colors.muted,
         },
         ..button::Style::default()
     }
@@ -667,13 +724,15 @@ pub fn link(theme: &Theme, status: button::Status) -> button::Style {
 
 /// A whole list row that opens on click: quiet until hovered.
 pub fn list_row(theme: &Theme, status: button::Status) -> button::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(c.surface)),
+            button::Status::Hovered | button::Status::Pressed => {
+                Some(Background::Color(colors.surface))
+            }
             button::Status::Active | button::Status::Disabled => None,
         },
-        text_color: c.text,
+        text_color: colors.text,
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
@@ -700,12 +759,12 @@ fn filled(fill: Color, text: Color, edge: Color) -> button::Style {
 
 /// A disabled button: no fill, a quiet outline and muted text, which stays
 /// readable (muted clears AA) instead of fading out.
-fn unavailable(c: &Colors) -> button::Style {
+fn unavailable(colors: &Colors) -> button::Style {
     button::Style {
         background: None,
-        text_color: c.muted,
+        text_color: colors.muted,
         border: Border {
-            color: c.line,
+            color: colors.line,
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -715,44 +774,50 @@ fn unavailable(c: &Colors) -> button::Style {
 
 /// The everyday button.
 pub fn secondary(theme: &Theme, status: button::Status) -> button::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     match status {
-        button::Status::Active => filled(c.control, c.text, c.edge),
-        button::Status::Hovered => filled(c.control_hover, c.text, c.edge),
-        button::Status::Pressed => filled(c.control_pressed, c.text, c.edge),
-        button::Status::Disabled => unavailable(c),
+        button::Status::Active => filled(colors.control, colors.text, colors.edge),
+        button::Status::Hovered => filled(colors.control_hover, colors.text, colors.edge),
+        button::Status::Pressed => filled(colors.control_pressed, colors.text, colors.edge),
+        button::Status::Disabled => unavailable(colors),
     }
 }
 
 /// The one action a screen is for: Add, Keep, Import.
 pub fn primary(theme: &Theme, status: button::Status) -> button::Style {
-    let c = colors(theme);
-    let strong = mix(c.accent, c.text, 0.25);
+    let colors = colors(theme);
+    let strong = mix(colors.accent, colors.text, 0.25);
     match status {
-        button::Status::Active => filled(c.accent, c.on_accent, c.accent),
-        button::Status::Hovered | button::Status::Pressed => filled(strong, c.on_accent, strong),
-        button::Status::Disabled => unavailable(c),
+        button::Status::Active => filled(colors.accent, colors.on_accent, colors.accent),
+        button::Status::Hovered | button::Status::Pressed => {
+            filled(strong, colors.on_accent, strong)
+        }
+        button::Status::Disabled => unavailable(colors),
     }
 }
 
 /// Discard and remove-everything actions.
 pub fn danger(theme: &Theme, status: button::Status) -> button::Style {
-    let c = colors(theme);
+    let colors = colors(theme);
     // in dark a full red fill outweighs the primary button: tinted instead
-    if c.palette == Palette::Dark {
-        let fill = mix(c.surface, c.error, 0.16);
-        let hover = mix(c.surface, c.error, 0.26);
+    if colors.palette == Palette::Dark {
+        let fill = mix(colors.surface, colors.error, 0.16);
+        let hover = mix(colors.surface, colors.error, 0.26);
         return match status {
-            button::Status::Active => filled(fill, c.error, c.error),
-            button::Status::Hovered | button::Status::Pressed => filled(hover, c.error, c.error),
-            button::Status::Disabled => unavailable(c),
+            button::Status::Active => filled(fill, colors.error, colors.error),
+            button::Status::Hovered | button::Status::Pressed => {
+                filled(hover, colors.error, colors.error)
+            }
+            button::Status::Disabled => unavailable(colors),
         };
     }
-    let strong = mix(c.error, c.text, 0.2);
+    let strong = mix(colors.error, colors.text, 0.2);
     match status {
-        button::Status::Active => filled(c.error, c.on_error, c.error),
-        button::Status::Hovered | button::Status::Pressed => filled(strong, c.on_error, strong),
-        button::Status::Disabled => unavailable(c),
+        button::Status::Active => filled(colors.error, colors.on_error, colors.error),
+        button::Status::Hovered | button::Status::Pressed => {
+            filled(strong, colors.on_error, strong)
+        }
+        button::Status::Disabled => unavailable(colors),
     }
 }
 

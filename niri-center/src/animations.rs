@@ -62,18 +62,21 @@ impl Curve {
     }
 }
 
+/// A spring as niri reads it: `spring damping-ratio=… stiffness=…
+/// epsilon=…`. Below a damping ratio of 1 it overshoots; it is at rest once
+/// within epsilon of its target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spring {
+    pub damping_ratio: f32,
+    pub stiffness: f32,
+    pub epsilon: f32,
+}
+
 /// How niri animates something when the config leaves it alone.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Motion {
-    Spring {
-        damping: f64,
-        stiffness: f64,
-        epsilon: f64,
-    },
-    Easing {
-        curve: Curve,
-        duration_ms: u32,
-    },
+    Spring(Spring),
+    Easing { curve: Curve, duration_ms: u32 },
 }
 
 /// Every animation niri has.
@@ -159,12 +162,12 @@ impl Animation {
     }
 }
 
-const fn spring(damping: f64, stiffness: f64, epsilon: f64) -> Motion {
-    Motion::Spring {
-        damping,
+const fn spring(damping_ratio: f32, stiffness: f32, epsilon: f32) -> Motion {
+    Motion::Spring(Spring {
+        damping_ratio,
         stiffness,
         epsilon,
-    }
+    })
 }
 
 const fn easing(curve: Curve, duration_ms: u32) -> Motion {
@@ -198,43 +201,43 @@ impl Editor {
     pub fn load(store: Option<&Store>, animation: Animation) -> Self {
         let name = animation.name();
         let default = animation.default_motion();
-        let spring = store.and_then(|s| s.spring_params(name));
-        let curve = store.and_then(|s| s.easing_curve(name));
+        let spring = store.and_then(|store| store.spring_params(name));
+        let curve = store.and_then(|store| store.easing_curve(name));
         let (default_curve, default_duration) = match default {
             Motion::Easing { curve, duration_ms } => (curve, duration_ms),
-            Motion::Spring { .. } => (Curve::EaseOutCubic, 250),
+            Motion::Spring(_) => (Curve::EaseOutCubic, 250),
         };
-        let (damping, stiffness) = match (spring, default) {
-            (Some((damping, stiffness, _)), _) => (damping, stiffness),
-            (
-                None,
-                Motion::Spring {
-                    damping, stiffness, ..
-                },
-            ) => (damping, stiffness),
-            (None, Motion::Easing { .. }) => (1.0, 800.0),
+        // an animation with an easing curve starts its spring at niri's
+        // window movement
+        let shown_spring = match (spring, default) {
+            (Some(spring), _) | (None, Motion::Spring(spring)) => spring,
+            (None, Motion::Easing { .. }) => Spring {
+                damping_ratio: 1.0,
+                stiffness: 800.0,
+                epsilon: 0.0001,
+            },
         };
         let points = store
-            .and_then(|s| s.bezier_points(name))
+            .and_then(|store| store.bezier_points(name))
             .unwrap_or([0.25, 0.1, 0.25, 1.0]);
         Self {
             animation,
             spring: match (&spring, &curve) {
                 (Some(_), _) => true,
                 (None, Some(_)) => false,
-                (None, None) => matches!(default, Motion::Spring { .. }),
+                (None, None) => matches!(default, Motion::Spring(_)),
             },
             curve: curve
                 .as_deref()
                 .and_then(Curve::from_name)
                 .unwrap_or(default_curve),
-            bezier: points.map(short_number),
+            bezier: points.map(|point| short_number(f64::from(point))),
             duration: store
-                .and_then(|s| s.duration_ms(name))
+                .and_then(|store| store.duration_ms(name))
                 .unwrap_or(default_duration)
                 .to_string(),
-            damping: damping as f32,
-            stiffness: stiffness as f32,
+            damping: shown_spring.damping_ratio,
+            stiffness: shown_spring.stiffness,
         }
     }
 
@@ -255,12 +258,12 @@ impl Editor {
             .filter(|ms| (1..=10_000).contains(ms))
             .ok_or("Enter a duration from 1 to 10000 milliseconds.")?;
         let points = if self.curve == Curve::CubicBezier {
-            let parsed: Vec<f64> = self
+            let parsed: Vec<f32> = self
                 .bezier
                 .iter()
-                .filter_map(|point| point.trim().parse::<f64>().ok())
+                .filter_map(|point| point.trim().parse::<f32>().ok())
                 .collect();
-            match <[f64; 4]>::try_from(parsed) {
+            match <[f32; 4]>::try_from(parsed) {
                 Ok(points)
                     if (0.0..=1.0).contains(&points[0]) && (0.0..=1.0).contains(&points[2]) =>
                 {
@@ -283,7 +286,7 @@ impl Editor {
                 points,
                 Some(duration),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
         Ok(format!(
             "{} now eases over {duration} ms.",
             self.animation.label()
@@ -294,17 +297,20 @@ impl Editor {
     pub fn set_spring(&self, store: &mut Store) -> Result<String, String> {
         let epsilon = store.spring_params(self.animation.name()).map_or_else(
             || match self.animation.default_motion() {
-                Motion::Spring { epsilon, .. } => epsilon,
+                Motion::Spring(spring) => spring.epsilon,
                 Motion::Easing { .. } => 0.0001,
             },
-            |(_, _, epsilon)| epsilon,
+            |spring| spring.epsilon,
         );
         // two decimals and whole numbers, as the sliders show them
-        let damping = (f64::from(self.damping) * 100.0).round() / 100.0;
-        let stiffness = f64::from(self.stiffness).round();
+        let spring = Spring {
+            damping_ratio: (self.damping * 100.0).round() / 100.0,
+            stiffness: self.stiffness.round(),
+            epsilon,
+        };
         store
-            .set_spring_params(self.animation.name(), damping, stiffness, epsilon)
-            .map_err(|e| e.to_string())?;
+            .set_spring_params(self.animation.name(), spring)
+            .map_err(|error| error.to_string())?;
         Ok(format!("{} now uses a spring.", self.animation.label()))
     }
 
@@ -312,7 +318,7 @@ impl Editor {
     pub fn set_playing(&self, store: &mut Store, on: bool) -> Result<String, String> {
         store
             .set_animation_off(self.animation.name(), !on)
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
         let name = self.animation.label();
         Ok(if on {
             format!("{name} plays again.")
@@ -325,7 +331,7 @@ impl Editor {
     pub fn reset(&self, store: &mut Store) -> Result<String, String> {
         store
             .reset_animation(self.animation.name())
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
         Ok(format!(
             "{} is back to niri's default.",
             self.animation.label()

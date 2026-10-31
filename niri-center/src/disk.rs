@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::history::FileChange;
+use crate::session::SaveWhen;
 use crate::store::{Store, StoreError};
 use crate::xdg::Places;
 use crate::{backup, snapshot, validate};
@@ -57,6 +58,8 @@ pub enum DiskError {
     NoBackup { name: String },
     #[error("snapshot {name}: {source}")]
     Snapshot { name: String, source: io::Error },
+    #[error("The preference could not be kept: {source}")]
+    Preference { source: io::Error },
 }
 
 /// A config read from disk, and the files in it the app cannot write.
@@ -66,12 +69,14 @@ pub struct Loaded {
     pub read_only: Vec<PathBuf>,
 }
 
-/// Where backups, snapshots and validation probes go on the desktop.
+/// Where backups, snapshots, validation probes and the preferences file go
+/// on the desktop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folders {
     pub backups: PathBuf,
     pub snapshots: PathBuf,
     pub probes: PathBuf,
+    pub preferences: PathBuf,
 }
 
 impl Folders {
@@ -81,15 +86,17 @@ impl Folders {
             backups: places.backups.clone(),
             snapshots: places.snapshots.clone(),
             probes: places.probes.clone(),
+            preferences: places.preferences.clone(),
         }
     }
 
-    /// All three in `dir`, for tests and tools.
+    /// All of them in `dir`, for tests and tools.
     pub fn under(dir: &Path) -> Self {
         Self {
             backups: dir.join("backups"),
             snapshots: dir.join("snapshots"),
             probes: dir.join("probes"),
+            preferences: dir.join("preferences"),
         }
     }
 }
@@ -208,7 +215,7 @@ impl Disk {
             let on_disk = match self.read(&file.path) {
                 Ok(text) => text,
                 // a file this save creates
-                Err(e) if e.kind() == io::ErrorKind::NotFound && file.before.is_empty() => {
+                Err(error) if error.kind() == io::ErrorKind::NotFound && file.before.is_empty() => {
                     String::new()
                 }
                 Err(source) => {
@@ -246,7 +253,10 @@ impl Disk {
 
     /// The files whose text on disk is no longer what `saved` says: another
     /// program wrote them. `before` is the saved text, `after` the disk's.
-    pub fn changed<'a>(&self, saved: impl Iterator<Item = (&'a Path, &'a str)>) -> Vec<FileChange> {
+    pub fn changed<'view>(
+        &self,
+        saved: impl Iterator<Item = (&'view Path, &'view str)>,
+    ) -> Vec<FileChange> {
         saved
             .filter_map(|(path, text)| {
                 let on_disk = self.read(path).ok()?;
@@ -371,6 +381,19 @@ impl Disk {
             }
         }
     }
+
+    /// Keep when edits are saved in the preferences file, for the next
+    /// start. In memory nothing is kept: the demo and the tests start from
+    /// defaults.
+    pub fn keep_save_when(&self, when: SaveWhen) -> Result<(), DiskError> {
+        match &self.backend {
+            Backend::Files(folders) => {
+                crate::prefs::set(&folders.preferences, SaveWhen::KEY, when.word())
+                    .map_err(|source| DiskError::Preference { source })
+            }
+            Backend::Memory(_) => Ok(()),
+        }
+    }
 }
 
 /// Where a save of the config at `main` writes: its folder and, when it is
@@ -379,7 +402,7 @@ impl Disk {
 pub fn config_dirs(main: &Path) -> Vec<PathBuf> {
     let folder = main
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let mut dirs = vec![folder];
@@ -398,7 +421,7 @@ pub fn config_dirs(main: &Path) -> Vec<PathBuf> {
 /// a link into a read-only store (NixOS, home-manager), or a folder outside
 /// the sandbox's reach. Found by trying, as a save would, to create a file
 /// beside each; nothing is left behind.
-fn read_only<'a>(paths: impl Iterator<Item = &'a Path>) -> Vec<PathBuf> {
+fn read_only<'view>(paths: impl Iterator<Item = &'view Path>) -> Vec<PathBuf> {
     paths
         .filter(|path| {
             let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -427,7 +450,8 @@ fn check(probes: &Path, job: &SaveJob) -> Result<(), DiskError> {
             source,
         })?;
     mirror(dir.path(), job).and_then(|main| {
-        let report = validate::validate(&main).map_err(|e| DiskError::Validator(e.to_string()))?;
+        let report =
+            validate::validate(&main).map_err(|error| DiskError::Validator(error.to_string()))?;
         if report.ok {
             Ok(())
         } else {
@@ -496,7 +520,9 @@ fn write_files(folders: &Folders, job: &SaveJob) -> Result<(), DiskError> {
             });
         }
     }
-    let _ = backup::prune(&folders.backups, KEEP_BACKUPS);
+    if backup::prune(&folders.backups, KEEP_BACKUPS).is_err() {
+        // the save is done: a backup left over is pruned by the next one
+    }
     Ok(())
 }
 
@@ -517,18 +543,31 @@ impl Staged {
             .ok_or_else(|| io::Error::other("no parent directory"))?;
         let file_name = resolved
             .file_name()
-            .and_then(|s| s.to_str())
+            .and_then(|name| name.to_str())
             .unwrap_or("config.kdl");
         let temp_path = dir.join(format!(".{file_name}.temp_path"));
-        fs::write(&temp_path, content)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = fs::metadata(&resolved) {
-                let perms = fs::Permissions::from_mode(meta.permissions().mode());
-                let _ = fs::set_permissions(&temp_path, perms);
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            // the file keeps its permissions, a private config included, and
+            // is never readable more widely while it is written
+            let mode = fs::metadata(&resolved).map_or(0o644, |meta| meta.permissions().mode());
+            let mut staged = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(mode & 0o777)
+                .open(&temp_path)?;
+            // a temp file left from before keeps its own mode until set
+            if fs::set_permissions(&temp_path, fs::Permissions::from_mode(mode)).is_err() {
+                // filesystems without permissions (vfat, some FUSE mounts)
+                // refuse it, and their files have none to keep
             }
+            staged.write_all(content.as_bytes())?;
         }
+        #[cfg(not(unix))]
+        fs::write(&temp_path, content)?;
         Ok(Self {
             temp_path,
             resolved,
@@ -541,7 +580,10 @@ impl Staged {
 
     /// Remove the temp file; the target was never touched.
     fn abandon(self) {
-        let _ = fs::remove_file(&self.temp_path);
+        if fs::remove_file(&self.temp_path).is_err() {
+            // a temp file left behind holds nothing the config lacks, and
+            // the next save of the file writes over it
+        }
     }
 }
 

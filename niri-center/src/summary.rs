@@ -118,13 +118,13 @@ fn name(spec: &Spec) -> String {
         .filter(|other| other.label == spec.label)
         .count()
         > 1;
-    if shared {
+    if let (true, Some(section)) = (shared, spec.section) {
         let mut label = spec.label.chars();
         let lower = label
             .next()
             .map(|first| first.to_lowercase().chain(label).collect::<String>())
             .unwrap_or_default();
-        format!("{} {lower}", spec.section)
+        format!("{section} {lower}")
     } else {
         spec.label.to_string()
     }
@@ -140,7 +140,7 @@ pub fn shown(spec: &Spec, reading: &Reading) -> String {
             "default".to_string()
         }
         Reading::OnOff(OnOff::Default) => spec.default.to_string(),
-        Reading::Value(None) => value_text(spec.kind, spec.default),
+        Reading::Value(None) => value_text(spec.kind, &spec.default),
         Reading::Value(Some(value)) => value_text(spec.kind, value),
     };
     shortened(value, 40)
@@ -188,7 +188,7 @@ fn output_changes(before: &Store, after: &Store) -> Vec<String> {
         let chain = output_chain(&name);
         for &setting in OutputSetting::ALL {
             let spec = setting.spec();
-            let read = |store: &Store| read(store, &chain, spec.child, spec.kind);
+            let read = |store: &Store| read(store, &chain, &spec.child, spec.kind);
             let (old, new) = (read(before), read(after));
             if old == new {
                 continue;
@@ -235,21 +235,24 @@ fn binding_changes(before: &Store, after: &Store) -> Vec<String> {
     let (old, new) = (before.binding_rows(), after.binding_rows());
     let mut lines = Vec::new();
     for binding in &new {
-        match old.iter().find(|o| o.key == binding.key) {
+        match old.iter().find(|was| was.key == binding.key) {
             None => lines.push(format!("New binding {}: {}", binding.key, binding.action)),
-            Some(o) if o.disabled != binding.disabled => lines.push(format!(
+            Some(was) if was.disabled != binding.disabled => lines.push(format!(
                 "{} turned {}",
                 binding.key,
                 if binding.disabled { "off" } else { "on" }
             )),
-            Some(o) if o.action != binding.action => lines.push(format!(
+            Some(was) if was.action != binding.action => lines.push(format!(
                 "{}: {} → {}",
-                binding.key, o.action, binding.action
+                binding.key, was.action, binding.action
             )),
             Some(_) => {}
         }
     }
-    for binding in old.iter().filter(|o| !new.iter().any(|n| n.key == o.key)) {
+    for binding in old
+        .iter()
+        .filter(|was| !new.iter().any(|now| now.key == was.key))
+    {
         lines.push(format!("Removed binding {}", binding.key));
     }
     lines

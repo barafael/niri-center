@@ -1,6 +1,6 @@
 //! A clickable keyboard visualizer for the Keybinds page.
 //!
-//! The picture follows the configured xkb layout (see [`Layout`]). Keys bound
+//! The picture follows the configured xkb layout (see [`Picture`]). Keys bound
 //! in the config are shaded and numbered by how many combos end on them;
 //! clicking a key filters the keybind list to combos ending on that key.
 
@@ -9,7 +9,7 @@ use iced::{Color, Length, Point, Rectangle, Renderer, Theme, mouse};
 use std::collections::HashMap;
 
 use niri_center::bindings::key_id;
-use niri_center::keyboard::{Layout, key_label, key_width, same_key};
+use niri_center::keyboard::{Key, Picture, key_width, same_key};
 
 /// Which key is pressed/clicked; the app toggles the list filter on it.
 #[derive(Debug, Clone)]
@@ -23,36 +23,36 @@ const NAV_GAP: f32 = 8.0;
 /// Gap between neighbouring key caps, so adjacent bound keys stay distinct.
 const KEY_GAP: f32 = 4.0;
 
-struct KeyRect {
-    token: &'static str,
+struct KeyRect<'picture> {
+    key: &'picture Key,
     rect: Rectangle,
 }
 
-fn compute_rects(layout: Layout, bounds: Rectangle) -> (Vec<KeyRect>, f32) {
+fn compute_rects(picture: &Picture, bounds: Rectangle) -> (Vec<KeyRect<'_>>, f32) {
     // local coordinates: the frame is translated by the widget's bounds at
     // draw time, so (0, 0) is the canvas origin
-    let rows = layout.rows();
+    let rows = &picture.rows;
     let avail_w = (bounds.width - 2.0 * PAD).max(1.0);
     let avail_h = (bounds.height - 2.0 * PAD - NAV_GAP).max(1.0);
     let row_h = avail_h / rows.len() as f32;
 
     let mut rects = Vec::new();
     for (row, keys) in rows.iter().enumerate() {
-        let units: f32 = keys.iter().map(|k| key_width(k)).sum();
+        let units: f32 = keys.iter().map(|key| key_width(&key.token)).sum();
         let key_w = avail_w / units;
         let nav_offset = if row + 1 == rows.len() { NAV_GAP } else { 0.0 };
-        let y = PAD + row as f32 * row_h + nav_offset;
-        let mut x = PAD;
-        for token in *keys {
-            let w = key_width(token) * key_w;
+        let top = PAD + row as f32 * row_h + nav_offset;
+        let mut left = PAD;
+        for key in keys {
+            let width = key_width(&key.token) * key_w;
             rects.push(KeyRect {
-                token,
+                key,
                 rect: Rectangle::new(
-                    Point::new(x + KEY_GAP / 2.0, y),
-                    iced::Size::new(w - KEY_GAP, row_h - KEY_GAP),
+                    Point::new(left + KEY_GAP / 2.0, top),
+                    iced::Size::new(width - KEY_GAP, row_h - KEY_GAP),
                 ),
             });
-            x += w;
+            left += width;
         }
     }
     (rects, row_h)
@@ -60,19 +60,19 @@ fn compute_rects(layout: Layout, bounds: Rectangle) -> (Vec<KeyRect>, f32) {
 
 /// Highlights keys by usage count; `selected` draws a ring and is clickable to
 /// toggle the list filter.
-pub struct KeyboardProgram {
-    pub layout: Layout,
+pub struct KeyboardProgram<'picture> {
+    pub picture: &'picture Picture,
     pub counts: HashMap<String, usize>,
     pub selected: Option<String>,
 }
 
 /// Key fills by use: an unused key sits flush with the surface; used keys
 /// take on the accent, more of it the more bindings end on them.
-pub fn heat(c: &crate::theme::Colors) -> [Color; 3] {
+pub fn heat(colors: &crate::theme::Colors) -> [Color; 3] {
     [
-        c.surface,
-        crate::theme::mix(c.surface, c.accent, 0.35),
-        crate::theme::mix(c.surface, c.accent, 0.7),
+        colors.surface,
+        crate::theme::mix(colors.surface, colors.accent, 0.35),
+        crate::theme::mix(colors.surface, colors.accent, 0.7),
     ]
 }
 
@@ -92,7 +92,13 @@ fn label(token: &str, position: Point, color: Color, size: f32) -> canvas::Text 
     }
 }
 
-impl<Message> Program<Message, Theme, Renderer> for KeyboardProgram
+/// About how wide `content` draws at `size`. A canvas cannot measure text,
+/// and the app's sans averages a little over half an em a glyph.
+fn estimated_width(content: &str, size: f32) -> f32 {
+    content.chars().count() as f32 * size * 0.6
+}
+
+impl<Message> Program<Message, Theme, Renderer> for KeyboardProgram<'_>
 where
     Message: From<KeyClicked> + 'static,
 {
@@ -100,15 +106,25 @@ where
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        kept: &mut Self::State,
         event: &canvas::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
+        // what the drawing shows besides the theme and its size, worked out
+        // only before a frame: every pointer move comes through here too
+        if matches!(
+            event,
+            canvas::Event::Window(iced::window::Event::RedrawRequested(_))
+        ) {
+            let mut counts: Vec<(&String, &usize)> = self.counts.iter().collect();
+            counts.sort_unstable();
+            kept.follow(event, (self.picture, counts, &self.selected));
+        }
         let pressed = match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => cursor
                 .position()
-                .map(|p| Point::new(p.x - bounds.x, p.y - bounds.y)),
+                .map(|point| Point::new(point.x - bounds.x, point.y - bounds.y)),
             // all other events are irrelevant to the visualizer
             canvas::Event::Mouse(_)
             | canvas::Event::Keyboard(_)
@@ -117,11 +133,11 @@ where
             | canvas::Event::InputMethod(_) => None,
         };
         if let Some(cursor) = pressed {
-            let (keys, _) = compute_rects(self.layout, bounds);
-            if let Some(hit) = keys.iter().find(|k| k.rect.contains(cursor)) {
+            let (keys, _) = compute_rects(self.picture, bounds);
+            if let Some(hit) = keys.iter().find(|key_rect| key_rect.rect.contains(cursor)) {
                 return Some(
                     canvas::Action::publish(Message::from(KeyClicked {
-                        token: hit.token.to_string(),
+                        token: hit.key.token.clone(),
                     }))
                     .and_capture(),
                 );
@@ -138,15 +154,7 @@ where
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
-        let mut counts: Vec<(&String, &usize)> = self.counts.iter().collect();
-        counts.sort_unstable();
-        let what = (
-            self.layout,
-            counts,
-            &self.selected,
-            crate::icons::palette_of(theme),
-        );
-        vec![kept.draw(renderer, bounds.size(), what, |frame| {
+        vec![kept.draw(renderer, theme, bounds.size(), |frame| {
             self.draw_keys(frame, theme, bounds);
         })]
     }
@@ -161,56 +169,72 @@ where
     }
 }
 
-impl KeyboardProgram {
+impl KeyboardProgram<'_> {
     fn draw_keys(&self, frame: &mut canvas::Frame, theme: &Theme, bounds: Rectangle) {
-        let c = crate::theme::colors(theme);
+        let colors = crate::theme::colors(theme);
         // heat: an unused key sits flush with the surface; used keys take on
         // the accent, more of it the more bindings end on them
-        let [key_off, key_on, key_hot] = heat(c);
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c.canvas);
-        let (keys, row_h) = compute_rects(self.layout, bounds);
+        let [key_off, key_on, key_hot] = heat(colors);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), colors.canvas);
+        let (keys, row_h) = compute_rects(self.picture, bounds);
         for key in &keys {
-            let count = self.counts.get(&key_id(key.token)).copied().unwrap_or(0);
+            let count = self
+                .counts
+                .get(&key_id(&key.key.token))
+                .copied()
+                .unwrap_or(0);
             let (key_color, text_color) = match count {
-                0 => (key_off, c.muted),
-                1 => (key_on, crate::theme::readable_on(c, key_on)),
-                _ => (key_hot, crate::theme::readable_on(c, key_hot)),
+                0 => (key_off, colors.muted),
+                1 => (key_on, crate::theme::readable_on(colors, key_on)),
+                _ => (key_hot, crate::theme::readable_on(colors, key_hot)),
             };
             let cap =
                 canvas::Path::rounded_rectangle(key.rect.position(), key.rect.size(), 3.0.into());
             frame.fill(&cap, key_color);
 
             let text_size = (row_h * 0.40).clamp(9.0, 14.0);
+            let count_size = text_size * 0.75;
+            // bindings ending on this key sit in the cap's top-right corner
+            // and the label takes the room left of them. A key too small for
+            // both keeps its label: its fill still says it is used.
+            let name = key.key.label.as_str();
+            let name_width = estimated_width(name, text_size);
+            let shown_count = (count > 0)
+                .then(|| count.to_string())
+                .map(|text| {
+                    let room = estimated_width(&text, count_size) + 3.0;
+                    (text, room)
+                })
+                .filter(|(_, room)| name_width + room <= key.rect.width - 4.0);
+            let room = key.rect.width - 4.0 - shown_count.as_ref().map_or(0.0, |(_, room)| *room);
+            let fitted = text_size * (room / name_width).min(1.0);
             frame.fill_text(label(
-                key_label(key.token),
-                key.rect.center(),
+                name,
+                Point::new(
+                    key.rect.x + 2.0 + room / 2.0,
+                    key.rect.y + key.rect.height / 2.0,
+                ),
                 text_color,
-                text_size,
+                fitted.max(7.0),
             ));
-            // bindings ending on this key, in the cap's top-right corner
-            if count > 0 {
+            if let Some((text, count_room)) = shown_count {
                 let corner = Point::new(
-                    key.rect.x + key.rect.width - text_size * 0.55,
-                    key.rect.y + text_size * 0.55,
+                    key.rect.x + key.rect.width - count_room / 2.0 - 1.0,
+                    key.rect.y + count_size * 0.75,
                 );
-                frame.fill_text(label(
-                    &count.to_string(),
-                    corner,
-                    text_color,
-                    text_size * 0.75,
-                ));
+                frame.fill_text(label(&text, corner, text_color, count_size));
             }
 
             if self
                 .selected
                 .as_deref()
-                .is_some_and(|selected| same_key(selected, key.token))
+                .is_some_and(|selected| same_key(selected, &key.key.token))
             {
                 frame.stroke(
                     &cap,
                     canvas::Stroke::default()
                         .with_width(2.0)
-                        .with_color(c.pending),
+                        .with_color(colors.pending),
                 );
             }
         }
@@ -219,15 +243,15 @@ impl KeyboardProgram {
 
 /// Canvas of the visualizer; height is bounded by the caller.
 pub fn keyboard_canvas<Message>(
-    layout: Layout,
+    picture: &Picture,
     counts: HashMap<String, usize>,
     selected: Option<String>,
-) -> Canvas<KeyboardProgram, Message>
+) -> Canvas<KeyboardProgram<'_>, Message>
 where
     Message: From<KeyClicked> + 'static,
 {
     Canvas::new(KeyboardProgram {
-        layout,
+        picture,
         counts,
         selected,
     })
@@ -241,7 +265,7 @@ where
 pub fn token_for(key: &iced::keyboard::Key) -> Option<String> {
     use iced::keyboard::{Key, key::Named};
     match key.as_ref() {
-        Key::Character(c) => Some(match c {
+        Key::Character(typed) => Some(match typed {
             "-" => "Minus".to_string(),
             "=" => "Equal".to_string(),
             "`" => "Grave".to_string(),
@@ -253,7 +277,7 @@ pub fn token_for(key: &iced::keyboard::Key) -> Option<String> {
             "[" => "BracketLeft".to_string(),
             "]" => "BracketRight".to_string(),
             "\\" => "BackSlash".to_string(),
-            other => other.to_uppercase(),
+            other => niri_center::keyboard::capital(other),
         }),
         Key::Named(named) => Some(
             match named {

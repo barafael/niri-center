@@ -77,12 +77,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
         }
         Message::SaveWhen(when) => {
             state.session.save_when = when;
-            // kept for the next start; tests and the demo keep nothing
-            if state.session.platform.writes_files()
-                && let Err(e) = niri_center::start::set_save_when(when)
-            {
-                state.status = error(format!("The preference could not be kept: {e}"));
-            }
+            state.session.ask(Command::KeepSaveWhen(when));
             // back to saving as changes are made: what waits goes now
             state.session.rearm();
         }
@@ -90,7 +85,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
     Task::none()
 }
 
-pub fn page<'a>(state: &'a App, store: &'a Store) -> El<'a> {
+pub fn page<'app>(state: &'app App, store: &'app Store) -> El<'app> {
     let mut file_rows = vec![pad(row![
         text(niri_center::store::tilde(store.path()))
             .size(13)

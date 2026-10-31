@@ -42,7 +42,7 @@ pub struct Value {
 
 impl Value {
     /// Exact raw bytes from the file, including quotes for strings.
-    pub fn raw<'a>(&self, doc: &'a Document) -> &'a str {
+    pub fn raw<'doc>(&self, doc: &'doc Document) -> &'doc str {
         &doc.source[self.span.start..self.span.end]
     }
 }
@@ -76,7 +76,7 @@ pub struct Node {
 
 impl Node {
     /// The node exactly as written, from its name to its last token.
-    pub fn raw<'a>(&self, doc: &'a Document) -> &'a str {
+    pub fn raw<'doc>(&self, doc: &'doc Document) -> &'doc str {
         &doc.source[self.node_span.start..self.node_span.end]
     }
 }
@@ -96,7 +96,7 @@ pub fn active_named<'nodes, 'name>(
 /// `[Name("output"), Index(1)]` = the second node named `output`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSeg {
-    Name(&'static str),
+    Name(String),
     /// Choose the `n`-th (0-based) occurrence among same-named siblings.
     Index(usize),
 }
@@ -154,7 +154,7 @@ impl Document {
 
     /// All nodes in document order (DFS).
     pub fn iter_all(&self) -> impl Iterator<Item = &Node> {
-        fn walk<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+        fn walk<'node>(node: &'node Node, out: &mut Vec<&'node Node>) {
             out.push(node);
             for child in &node.children {
                 walk(child, out);
@@ -169,7 +169,7 @@ impl Document {
 
     /// All nodes (any depth) with the given name, in document order.
     pub fn find_all(&self, name: &str) -> Vec<&Node> {
-        self.iter_all().filter(|n| n.name == name).collect()
+        self.iter_all().filter(|node| node.name == name).collect()
     }
 
     /// Find a node by path. `Name` segments match child-node names; an
@@ -178,29 +178,27 @@ impl Document {
     pub fn find(&self, path: &[PathSeg]) -> Option<&Node> {
         let mut siblings: Vec<&Node> = self.roots.iter().collect();
         let mut found = None;
-        let mut i = 0;
-        while i < path.len() {
-            match &path[i] {
-                PathSeg::Name(name) => {
-                    let matching: Vec<&Node> = siblings
-                        .iter()
-                        .filter(|n| n.name == *name)
-                        .copied()
-                        .collect();
-                    let index = match path.get(i + 1) {
-                        Some(PathSeg::Index(n)) => {
-                            i += 1; // consume the Index this iteration
-                            *n
-                        }
-                        _ => 0,
-                    };
-                    let node = matching.get(index).copied()?;
-                    found = Some(node);
-                    siblings = node.children.iter().collect();
-                    i += 1;
+        let mut segments = path.iter().peekable();
+        while let Some(segment) = segments.next() {
+            let PathSeg::Name(name) = segment else {
+                return None;
+            };
+            let matching: Vec<&Node> = siblings
+                .iter()
+                .filter(|node| node.name == *name)
+                .copied()
+                .collect();
+            // a name with an index after it picks that one of its kind
+            let index = match segments.peek() {
+                Some(PathSeg::Index(node)) => {
+                    segments.next();
+                    *node
                 }
-                PathSeg::Index(_) => return None,
-            }
+                Some(PathSeg::Name(_)) | None => 0,
+            };
+            let node = matching.get(index).copied()?;
+            found = Some(node);
+            siblings = node.children.iter().collect();
         }
         found
     }
@@ -212,8 +210,7 @@ impl Document {
     /// never re-derive from the raw span.
     pub fn value_text(&self, value: &Value) -> String {
         match &value.kind {
-            ValueKind::Quoted(s) => s.clone(),
-            ValueKind::Bare(s) | ValueKind::Number(s) => s.clone(),
+            ValueKind::Quoted(s) | ValueKind::Bare(s) | ValueKind::Number(s) => s.clone(),
         }
     }
 
@@ -232,7 +229,7 @@ impl Document {
         let span = node
             .props
             .iter()
-            .find(|p| p.name == prop)
+            .find(|candidate| candidate.name == prop)
             .ok_or_else(|| EditError::PropNotFound {
                 name: node.name.clone(),
                 prop: prop.to_string(),
@@ -268,7 +265,7 @@ impl Document {
     fn push_edit(&mut self, edit: Edit) {
         self.edits.push(edit);
         // an insertion goes before a replacement that starts where it does
-        self.edits.sort_by_key(|e| (e.start, e.end));
+        self.edits.sort_by_key(|edit| (edit.start, edit.end));
         // P0 edits are non-overlapping by construction (each spans one value).
     }
 
@@ -298,8 +295,8 @@ impl Document {
 }
 
 impl fmt::Display for Document {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&apply_edits(&self.source, &self.edits))
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(&apply_edits(&self.source, &self.edits))
     }
 }
 
@@ -348,11 +345,11 @@ fn raw_edit(span: Span, replacement: &str) -> Edit {
 pub fn quoted(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
-    for c in text.chars() {
-        match c {
+    for character in text.chars() {
+        match character {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
+            _ => out.push(character),
         }
     }
     out.push('"');

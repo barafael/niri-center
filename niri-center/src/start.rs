@@ -53,9 +53,15 @@ pub fn sandbox(platform: Platform, store: &Store) -> Option<String> {
             "This demo runs in your browser on a bundled config and writes no files.".to_string(),
         ),
         Platform::InMemory => None,
-        Platform::Desktop => crate::sandbox::apply(&crate::disk::config_dirs(store.path()))
-            .ok()
-            .map(|status| status.describe()),
+        Platform::Desktop => Some(
+            match crate::sandbox::apply(
+                &crate::disk::config_dirs(store.path()),
+                crate::sandbox::Allowances::from_environment().as_ref(),
+            ) {
+                Ok(status) => status.describe(),
+                Err(error) => format!("No sandbox: it could not be set up ({error})."),
+            },
+        ),
     }
 }
 
@@ -65,14 +71,8 @@ pub(crate) fn save_when() -> SaveWhen {
         return SaveWhen::AfterChange;
     }
     Places::find()
-        .and_then(|places| crate::prefs::get(&places.preferences, "save"))
+        .and_then(|places| crate::prefs::get(&places.preferences, SaveWhen::KEY))
         .as_deref()
         .and_then(SaveWhen::read)
         .unwrap_or_default()
-}
-
-/// Keep when edits are saved, for the next start.
-pub fn set_save_when(when: SaveWhen) -> std::io::Result<()> {
-    let places = Places::find().ok_or(std::io::ErrorKind::NotFound)?;
-    crate::prefs::set(&places.preferences, "save", when.word())
 }

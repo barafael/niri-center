@@ -22,7 +22,7 @@ const fn color(colors: &theme::Colors, token: Token) -> Color {
 }
 
 /// Lines of KDL, colored, in a code block.
-pub fn block<'a>(source: &str, colors: &theme::Colors, size: f32) -> El<'a> {
+pub fn block<'view>(source: &str, colors: &theme::Colors, size: f32) -> El<'view> {
     let mut lines = iced::widget::column![];
     for text in source.lines() {
         lines = lines.push(line(text, colors, size));
@@ -36,8 +36,8 @@ pub fn block<'a>(source: &str, colors: &theme::Colors, size: f32) -> El<'a> {
 }
 
 /// One line of KDL, colored, in the monospace face.
-pub fn line<'a>(source: &str, colors: &theme::Colors, size: f32) -> El<'a> {
-    let spans: Vec<Span<'a, (), iced::Font>> = tokens(source)
+pub fn line<'view>(source: &str, colors: &theme::Colors, size: f32) -> El<'view> {
+    let spans: Vec<Span<'view, (), iced::Font>> = tokens(source)
         .into_iter()
         .map(|(range, token)| {
             let piece = span(source[range].to_string()).color(color(colors, token));
@@ -70,13 +70,13 @@ pub enum Mark {
 
 /// Lines `first` to `last` (1-based) of `source`, numbered and colored,
 /// with the lines in `changed` marked as not saved yet.
-pub fn numbered_lines<'a>(
+pub fn numbered_lines<'view>(
     source: &str,
     first: usize,
     last: usize,
     changed: &[usize],
     colors: &theme::Colors,
-) -> Column<'a, Message> {
+) -> Column<'view, Message> {
     let mut lines = column![].width(Length::Fill);
     for (index, line) in source
         .lines()
@@ -90,14 +90,14 @@ pub fn numbered_lines<'a>(
         } else {
             Mark::Plain
         };
-        lines = lines.push(numbered(number, line, mark, None, colors));
+        lines = lines.push(numbered(number, line, mark, Gutter::Number, colors));
     }
     lines
 }
 
 /// Numbered lines on a surface of their own. Long lines run past the
 /// edge: wrapped, KDL would lose its line numbers.
-pub fn lines_block<'a>(lines: Column<'a, Message>) -> El<'a> {
+pub fn lines_block<'view>(lines: Column<'view, Message>) -> El<'view> {
     container(lines)
         .padding([8, 0])
         .clip(true)
@@ -106,19 +106,27 @@ pub fn lines_block<'a>(lines: Column<'a, Message>) -> El<'a> {
         .into()
 }
 
+/// What stands left of a line's text besides its number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gutter {
+    Number,
+    /// A diff's `+` or `-` after the number, by the line's mark.
+    Sign,
+}
+
 /// One line of KDL behind its number, the way the source column, the
-/// repair panel and History show code. `sign` is a diff's `+` or `-`.
-pub fn numbered<'a>(
+/// repair panel and History show code.
+pub fn numbered<'view>(
     number: usize,
     source: &str,
     mark: Mark,
-    sign: Option<&'static str>,
+    gutter: Gutter,
     colors: &theme::Colors,
-) -> El<'a> {
-    let number_style = match mark {
-        Mark::Changed => theme::pending,
-        Mark::Added if sign.is_none() => theme::success,
-        Mark::Plain | Mark::Added | Mark::Removed => theme::muted,
+) -> El<'view> {
+    let number_style = match (mark, gutter) {
+        (Mark::Changed, _) => theme::pending,
+        (Mark::Added, Gutter::Number) => theme::success,
+        (Mark::Plain | Mark::Removed, _) | (Mark::Added, Gutter::Sign) => theme::muted,
     };
     let mut shown = row![
         text(number.to_string())
@@ -129,11 +137,11 @@ pub fn numbered<'a>(
             .align_x(iced::alignment::Horizontal::Right),
         space().width(10),
     ];
-    if let Some(sign) = sign {
-        let tint = match mark {
-            Mark::Added => colors.success,
-            Mark::Removed => colors.error,
-            Mark::Plain | Mark::Changed => colors.muted,
+    if gutter == Gutter::Sign {
+        let (sign, tint) = match mark {
+            Mark::Added => ("+", colors.success),
+            Mark::Removed => ("-", colors.error),
+            Mark::Plain | Mark::Changed => (" ", colors.muted),
         };
         shown = shown.push(text(sign).size(13).font(theme::MONO).width(16).color(tint));
     }

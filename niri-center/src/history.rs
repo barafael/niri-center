@@ -97,12 +97,17 @@ pub fn record(dir: &Path, entry: &Entry, files: &[FileChange]) -> io::Result<()>
         time += 1;
     }
     let partial = dir.join(format!(".{time}"));
-    let _ = fs::remove_dir_all(&partial);
+    // what a crash left half written goes; there is normally nothing
+    match fs::remove_dir_all(&partial) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        Ok(()) | Err(_) => {}
+    }
     fs::create_dir(&partial)?;
     let written = write_entry(&partial, entry, files)
         .and_then(|()| fs::rename(&partial, dir.join(time.to_string())));
-    if written.is_err() {
-        let _ = fs::remove_dir_all(&partial);
+    if written.is_err() && fs::remove_dir_all(&partial).is_err() {
+        // the failure to report is the write's; a partial folder left
+        // behind is removed by the next entry of that time
     }
     written
 }
@@ -197,7 +202,9 @@ pub fn prune(dir: &Path, keep: usize) {
     times.sort_unstable();
     let excess = times.len().saturating_sub(keep);
     for time in times.iter().take(excess) {
-        let _ = fs::remove_dir_all(dir.join(time.to_string()));
+        if fs::remove_dir_all(dir.join(time.to_string())).is_err() {
+            // an entry that cannot go now is pruned with the next one
+        }
     }
 }
 
@@ -238,7 +245,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         record(dir.path(), &entry(5, Source::App), &change()).unwrap();
         record(dir.path(), &entry(5, Source::App), &change()).unwrap();
-        let times: Vec<u128> = load(dir.path()).iter().map(|e| e.time).collect();
+        let times: Vec<u128> = load(dir.path()).iter().map(|entry| entry.time).collect();
         assert_eq!(times, vec![5, 6]);
     }
 
@@ -249,7 +256,7 @@ mod tests {
             record(dir.path(), &entry(time, Source::App), &change()).unwrap();
         }
         prune(dir.path(), 2);
-        let times: Vec<u128> = load(dir.path()).iter().map(|e| e.time).collect();
+        let times: Vec<u128> = load(dir.path()).iter().map(|entry| entry.time).collect();
         assert_eq!(times, vec![4, 5]);
     }
 

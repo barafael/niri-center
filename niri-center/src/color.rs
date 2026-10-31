@@ -4,6 +4,7 @@
 //! gradient props a color row edits.
 
 use crate::kdl::{ValueKind, parse_document, quoted};
+use num_traits::ToPrimitive;
 
 /// A color, each channel in 0..=1.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,7 +36,13 @@ impl Rgba {
 
     /// `#rrggbb`, or `#rrggbbaa` when not opaque: what gets written.
     pub fn hex(self) -> String {
-        let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+        // a channel that is not a number reads as none of the color
+        let byte = |channel: f32| {
+            (channel.clamp(0.0, 1.0) * 255.0)
+                .round()
+                .to_u8()
+                .unwrap_or(0)
+        };
         let [r, g, b, a] = [self.r, self.g, self.b, self.a].map(byte);
         if a == 255 {
             format!("#{r:02x}{g:02x}{b:02x}")
@@ -99,22 +106,28 @@ impl Hsva {
     }
 
     pub fn rgba(self) -> Rgba {
-        let c = self.value * self.saturation;
-        let h = self.hue.rem_euclid(360.0) / 60.0;
-        let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
-        let (r, g, b) = match h as u32 {
-            0 => (c, x, 0.0),
-            1 => (x, c, 0.0),
-            2 => (0.0, c, x),
-            3 => (0.0, x, c),
-            4 => (x, 0.0, c),
-            _ => (c, 0.0, x),
+        let chroma = self.value * self.saturation;
+        let sector = self.hue.rem_euclid(360.0) / 60.0;
+        let second = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+        // the sixth of the color wheel the hue is in
+        let (red, green, blue) = if sector < 1.0 {
+            (chroma, second, 0.0)
+        } else if sector < 2.0 {
+            (second, chroma, 0.0)
+        } else if sector < 3.0 {
+            (0.0, chroma, second)
+        } else if sector < 4.0 {
+            (0.0, second, chroma)
+        } else if sector < 5.0 {
+            (second, 0.0, chroma)
+        } else {
+            (chroma, 0.0, second)
         };
-        let m = self.value - c;
+        let lift = self.value - chroma;
         Rgba {
-            r: r + m,
-            g: g + m,
-            b: b + m,
+            r: red + lift,
+            g: green + lift,
+            b: blue + lift,
             a: self.alpha,
         }
     }

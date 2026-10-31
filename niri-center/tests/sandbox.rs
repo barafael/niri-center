@@ -14,15 +14,16 @@
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc;
 
-use niri_center::sandbox::{SandboxStatus, apply};
+use niri_center::sandbox::{Allowances, SandboxStatus, apply};
+use niri_center::xdg::Places;
 
 #[test]
 fn sandbox_enforces_write_boundary() {
     // build two writable roots + a sibling that must stay read-only
     let base = match tempfile::tempdir() {
         Ok(base) => base,
-        Err(e) => {
-            eprintln!("no tmpdir available: {e}");
+        Err(error) => {
+            eprintln!("no tmpdir available: {error}");
             return;
         }
     };
@@ -38,21 +39,18 @@ fn sandbox_enforces_write_boundary() {
     let unlisted_socket = base.path().join("other.sock");
     let _listed_listener = UnixListener::bind(&listed_socket).unwrap();
     let _unlisted_listener = UnixListener::bind(&unlisted_socket).unwrap();
-    // SAFETY: this binary holds a single test, so no other thread reads the
-    // environment concurrently.
-    unsafe {
-        std::env::set_var("NIRI_SOCKET", &listed_socket);
-        std::env::remove_var("WAYLAND_DISPLAY");
-        // the app's own folders, which `apply` creates, go here too
-        for (variable, dir) in [
-            ("XDG_CONFIG_HOME", "config"),
-            ("XDG_DATA_HOME", "data"),
-            ("XDG_STATE_HOME", "state"),
-            ("XDG_RUNTIME_DIR", "runtime"),
-        ] {
-            std::env::set_var(variable, base.path().join(dir));
-        }
-    }
+    // the app's own folders, which `apply` creates, go here too
+    let places = Places {
+        preferences: base.path().join("config/niri-center/preferences"),
+        snapshots: base.path().join("data/niri-center/snapshots"),
+        history: base.path().join("state/niri-center/history"),
+        backups: base.path().join("state/niri-center/backups"),
+        probes: base.path().join("runtime/niri-center/probes"),
+    };
+    let allowances = Allowances {
+        places: Some(places),
+        sockets: vec![listed_socket.clone()],
+    };
 
     // a thread started before `apply`, like iced's and tokio's in the GUI
     let (go_tx, go_rx) = mpsc::channel::<()>();
@@ -62,10 +60,10 @@ fn sandbox_enforces_write_boundary() {
         std::fs::write(&early_target, "nope")
     });
 
-    let status = match apply(&[allow.clone(), resolved_target.clone()]) {
+    let status = match apply(&[allow.clone(), resolved_target.clone()], Some(&allowances)) {
         Ok(status) => status,
-        Err(e) => {
-            eprintln!("apply failed: {e}");
+        Err(error) => {
+            eprintln!("apply failed: {error}");
             return;
         }
     };
@@ -118,7 +116,7 @@ fn sandbox_enforces_write_boundary() {
         let listed = UnixStream::connect(&listed_socket);
         assert!(
             listed.is_ok(),
-            "NIRI_SOCKET must stay reachable: {listed:?}"
+            "the listed socket must stay reachable: {listed:?}"
         );
         let unlisted = UnixStream::connect(&unlisted_socket);
         assert!(
@@ -127,10 +125,10 @@ fn sandbox_enforces_write_boundary() {
         );
     }
 
-    // best-effort cleanup of the innards (from within the allowed roots);
-    // the empty dirs themselves can't be rmdir'd from /tmp under the sandbox
-    let _ = std::fs::remove_dir_all(allow.join("nested"));
-    let _ = std::fs::remove_file(allow.join("config.kdl"));
-    let _ = std::fs::remove_file(resolved_target.join("config.kdl"));
+    // removing inside the allowed roots works too; the empty dirs
+    // themselves can't be rmdir'd from /tmp under the sandbox
+    std::fs::remove_dir_all(allow.join("nested")).unwrap();
+    std::fs::remove_file(allow.join("config.kdl")).unwrap();
+    std::fs::remove_file(resolved_target.join("config.kdl")).unwrap();
     std::mem::forget(base);
 }

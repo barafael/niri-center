@@ -20,8 +20,8 @@ use crate::{color, curves, keyboard, shortcuts};
 // the browser demo has no event stream to deliver niri's events
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum Message {
-    /// What the disk actor answers (boxed: a loaded config is large).
-    Disk(Box<Reply>),
+    /// What the disk actor answers.
+    Disk(Reply),
     Page(Page),
     Keybinds(crate::pages::keybinds::Message),
     Startup(crate::pages::startup::Message),
@@ -31,18 +31,18 @@ pub enum Message {
     Output(String, OutputSetting, Edit),
     /// Open (or close) the color picker under the field `key`, which shows
     /// `Color`; picked colors go into the target message.
-    OpenColor(ColorField, Option<Color>, Box<Self>),
+    OpenColor(ColorField, Option<Color>, crate::controls::Destination),
     ColorPicked(color::Hsva),
     PickScreenColor,
     ScreenColor(Result<Option<[f64; 3]>, String>),
     CloseColor,
-    /// Ask the desktop's file chooser for a path for the target message.
+    /// Ask the desktop's file chooser for a path, for `to`.
     Browse {
-        target: Box<Self>,
+        to: crate::controls::Destination,
         folder: bool,
     },
-    Browsed(Box<Self>, Result<Option<String>, String>),
-    SystemLoaded(Box<SystemData>),
+    Browsed(crate::controls::Destination, Result<Option<String>, String>),
+    SystemLoaded(SystemData),
     Animations(crate::pages::animations::Message),
     Rules(crate::pages::rules::Message),
     // displays, windows, events
@@ -75,6 +75,9 @@ pub enum Message {
     ShowHelp(bool),
     PopOut(Page),
     PoppedOut(Result<(), String>),
+    /// Open niri's documentation on a page in the browser.
+    OpenDocs(Page),
+    LinkOpened(Result<(), String>),
     // saving and the history
     /// The wait after the last edit may be over: save when it is.
     SaveTick,
@@ -83,6 +86,12 @@ pub enum Message {
     Undo,
     /// Show or hide the config beside the page.
     ShowSource(bool),
+    /// Fold a file on the Config file page to its heading (or open it).
+    FoldFile(PathBuf, bool),
+    /// Scroll the Config file page to a file, by its place, opening it.
+    JumpToFile(usize, PathBuf),
+    /// Take every setting of the page out of the config, as one change.
+    PageDefaults(Page),
     /// Fold the sidebar to icons, or open it.
     ToggleSidebar,
     /// Close the popped-out config window.
@@ -101,6 +110,8 @@ pub enum Message {
     WindowClosed(u64),
     // niri's config reloads
     NiriConfigLoaded(bool),
+    /// niri types with the configured layout at this place now.
+    NiriKeyboardLayout(usize),
     /// Rename a misspelled node niri rejected.
     FixTypo {
         path: PathBuf,
@@ -151,6 +162,7 @@ pub fn from_niri(reply: niri::Reply) -> Message {
         niri::Reply::Running(result) => Message::RunningLoaded(result),
         niri::Reply::Focused(result) => Message::WindowFocused(result),
         niri::Reply::Spawned(result) => Message::PoppedOut(result),
+        niri::Reply::Opened(result) => Message::LinkOpened(result),
         niri::Reply::PickedWindow(result) => {
             Message::Rules(crate::pages::rules::Message::WindowPicked(result))
         }
@@ -158,6 +170,7 @@ pub fn from_niri(reply: niri::Reply) -> Message {
         niri::Reply::ConfigLoaded { failed } => Message::NiriConfigLoaded(failed),
         niri::Reply::SourceWindow(id) => Message::SourceWindow(id),
         niri::Reply::WindowClosed(id) => Message::WindowClosed(id),
+        niri::Reply::KeyboardLayout(index) => Message::NiriKeyboardLayout(index),
         niri::Reply::Live { kind, text } => Message::LiveEvent(kind, text),
         niri::Reply::LiveError(e) => Message::LiveError(e),
     }

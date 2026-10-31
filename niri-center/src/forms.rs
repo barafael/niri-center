@@ -46,7 +46,7 @@ impl RuleDraft {
     }
 
     pub fn rule(&self) -> NewWindowRule {
-        let text = |text: &str| Some(text.trim().to_string()).filter(|t| !t.is_empty());
+        let text = |text: &str| Some(text.trim().to_string()).filter(|trimmed| !trimmed.is_empty());
         NewWindowRule {
             app_id: text(&self.app),
             app_id_how: self.app_how,
@@ -92,10 +92,12 @@ impl BindingForm {
         if let Some(index) = self.editing {
             store
                 .edit_binding(index, key, &body)
-                .map_err(|e| e.to_string())?;
+                .map_err(|error| error.to_string())?;
             return Ok("Binding updated.".to_string());
         }
-        let at = store.add_binding(key, &body).map_err(|e| e.to_string())?;
+        let at = store
+            .add_binding(key, &body)
+            .map_err(|error| error.to_string())?;
         // the same key in another file: whichever niri reads last wins
         let rows = store.binding_rows();
         let added = rows.get(at);
@@ -134,15 +136,19 @@ impl RuleDraft {
             ),
             None => (store.add_window_rule(&rule), "Rule added."),
         };
-        written.map(|at| (at, done)).map_err(|e| e.to_string())
+        written
+            .map(|at| (at, done))
+            .map_err(|error| error.to_string())
     }
 }
 
 /// Why `name` cannot be an environment variable's name, if it cannot.
 pub fn environment_name_problem(name: &str) -> Option<&'static str> {
     let valid = !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        && !name.starts_with(|character: char| character.is_ascii_digit())
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_');
     (!valid).then_some(
         "A variable name is letters, digits and underscores, and does not start with a digit.",
     )

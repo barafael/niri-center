@@ -53,8 +53,8 @@ impl When {
 }
 
 impl std::fmt::Display for When {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
             Self::Focused => "is focused",
             Self::NotFocused => "is not focused",
             Self::Floating => "is floating",
@@ -152,7 +152,7 @@ pub fn reach(rule: &WindowRuleRow, window: &OpenWindow) -> Reach {
 /// lines.
 pub fn reach_when_on(matchers: &[Matcher], window: &OpenWindow) -> Reach {
     let (excludes, matches): (Vec<&Matcher>, Vec<&Matcher>) =
-        matchers.iter().partition(|m| m.exclude);
+        matchers.iter().partition(|matcher| matcher.exclude);
     for exclude in excludes {
         match line(exclude, window) {
             Some(Ok(())) => {
@@ -196,12 +196,18 @@ pub fn name(rule: &WindowRuleRow) -> String {
     let who = rule
         .matchers
         .iter()
-        .find(|m| !m.exclude)
-        .and_then(|m| {
-            m.props
+        .find(|matcher| !matcher.exclude)
+        .and_then(|matcher| {
+            matcher
+                .props
                 .iter()
                 .find(|prop| prop.name == MatchName::AppId)
-                .or_else(|| m.props.iter().find(|prop| prop.name == MatchName::Title))
+                .or_else(|| {
+                    matcher
+                        .props
+                        .iter()
+                        .find(|prop| prop.name == MatchName::Title)
+                })
         })
         .map_or_else(|| "Every window".to_string(), |prop| readable(&prop.value));
     let what = what(rule);
@@ -226,7 +232,7 @@ pub fn what(rule: &WindowRuleRow) -> String {
 /// `match` line's title and states (`title Picture-in-Picture, is
 /// floating`). `None` when the app alone does.
 pub fn condition(rule: &WindowRuleRow) -> Option<String> {
-    let matcher = rule.matchers.iter().find(|m| !m.exclude)?;
+    let matcher = rule.matchers.iter().find(|matcher| !matcher.exclude)?;
     let words: Vec<String> = matcher
         .props
         .iter()

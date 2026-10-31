@@ -5,6 +5,7 @@ use iced::widget::canvas::{self, Canvas, Program};
 use iced::widget::text::{LineHeight, Shaping};
 use iced::{Color, Length, Point, Rectangle, Renderer, Theme, mouse};
 use niri_center::outputs::MonitorInfo;
+use num_traits::ToPrimitive;
 
 /// Canvas program state persisted by iced between events.
 #[derive(Default)]
@@ -19,6 +20,17 @@ struct Drag {
     cursor: Point,
 }
 
+/// A display's logical rectangle in the canvas's f32. Screen geometry is
+/// far inside f32's range; one that is not is not drawn.
+fn drawn(monitor: &MonitorInfo) -> Option<Rectangle> {
+    Some(Rectangle {
+        x: monitor.x.to_f32()?,
+        y: monitor.y.to_f32()?,
+        width: monitor.width.to_f32()?,
+        height: monitor.height.to_f32()?,
+    })
+}
+
 /// 2D mapping between logical config coordinates and canvas pixels.
 struct Layout {
     scale: f32,
@@ -31,43 +43,43 @@ impl Layout {
         if monitors.is_empty() || bounds.width < 1.0 || bounds.height < 1.0 {
             return None;
         }
-        let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
-        let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for (_, m) in monitors {
-            min_x = min_x.min(m.x);
-            min_y = min_y.min(m.y);
-            max_x = max_x.max(m.x + m.width);
-            max_y = max_y.max(m.y + m.height);
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for monitor in monitors.iter().filter_map(|(_, monitor)| drawn(monitor)) {
+            min_x = min_x.min(monitor.x);
+            min_y = min_y.min(monitor.y);
+            max_x = max_x.max(monitor.x + monitor.width);
+            max_y = max_y.max(monitor.y + monitor.height);
         }
         let pad = 24.0;
-        let bbox_w = (max_x - min_x).max(1.0) as f32;
-        let bbox_h = (max_y - min_y).max(1.0) as f32;
+        let bbox_w = (max_x - min_x).max(1.0);
+        let bbox_h = (max_y - min_y).max(1.0);
         let scale = ((2.0f32.mul_add(-pad, bounds.width) / bbox_w)
             .min(2.0f32.mul_add(-pad, bounds.height) / bbox_h))
         .clamp(0.05, 2.0);
         // local coordinates: the frame is translated by the widget bounds at
         // draw time, so the origin is relative to the canvas corner
         let origin = Point::new(
-            (min_x as f32).mul_add(-scale, bbox_w.mul_add(-scale, bounds.width) / 2.0),
-            (min_y as f32).mul_add(-scale, bbox_h.mul_add(-scale, bounds.height) / 2.0),
+            min_x.mul_add(-scale, bbox_w.mul_add(-scale, bounds.width) / 2.0),
+            min_y.mul_add(-scale, bbox_h.mul_add(-scale, bounds.height) / 2.0),
         );
         Some(Self { scale, origin })
     }
 
-    fn logical_to_canvas(&self, m: &MonitorInfo) -> Rectangle {
+    fn logical_to_canvas(&self, rect: Rectangle) -> Rectangle {
         Rectangle {
-            x: (m.x as f32).mul_add(self.scale, self.origin.x),
-            y: (m.y as f32).mul_add(self.scale, self.origin.y),
-            width: m.width as f32 * self.scale,
-            height: m.height as f32 * self.scale,
+            x: rect.x.mul_add(self.scale, self.origin.x),
+            y: rect.y.mul_add(self.scale, self.origin.y),
+            width: rect.width * self.scale,
+            height: rect.height * self.scale,
         }
     }
 
-    fn canvas_to_logical(&self, p: Point) -> Point {
+    fn canvas_to_logical(&self, point: Point) -> Point {
         // niri takes positions left of or above 0,0 as well
         Point::new(
-            (p.x - self.origin.x) / self.scale,
-            (p.y - self.origin.y) / self.scale,
+            (point.x - self.origin.x) / self.scale,
+            (point.y - self.origin.y) / self.scale,
         )
     }
 }
@@ -76,6 +88,8 @@ impl Layout {
 pub struct MonitorProgram {
     /// `(name, logical geometry)` in IPC order.
     pub monitors: Vec<(String, MonitorInfo)>,
+    /// The display whose settings the page shows, outlined in the accent.
+    pub selected: Option<String>,
 }
 
 fn label(content: String, position: Point, color: Color, size: f32) -> canvas::Text {
@@ -106,18 +120,21 @@ where
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let local = |p: Point| Point::new(p.x - bounds.x, p.y - bounds.y);
+        let local = |point: Point| Point::new(point.x - bounds.x, point.y - bounds.y);
         let cursor_local = cursor.position().map(local);
         let layout = Layout::new(&self.monitors, bounds)?;
 
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let pos = cursor_local?;
-                for (i, (_, m)) in self.monitors.iter().enumerate() {
-                    let rect = layout.logical_to_canvas(m);
+                for (place, (_, monitor)) in self.monitors.iter().enumerate() {
+                    let Some(logical) = drawn(monitor) else {
+                        continue;
+                    };
+                    let rect = layout.logical_to_canvas(logical);
                     if rect.contains(pos) {
                         state.drag = Some(Drag {
-                            index: i,
+                            index: place,
                             offset: Point::new(pos.x - rect.x, pos.y - rect.y),
                             cursor: pos,
                         });
@@ -133,17 +150,17 @@ where
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(drag) = state.drag.take() {
-                    let pos = cursor.position().map(local).unwrap_or(drag.cursor);
+                    let pos = cursor.position().map_or(drag.cursor, local);
                     let logical = layout.canvas_to_logical(Point::new(
                         pos.x - drag.offset.x,
                         pos.y - drag.offset.y,
                     ));
-                    let (name, _) = &self.monitors[drag.index];
+                    let (name, _) = self.monitors.get(drag.index)?;
                     return Some(
                         canvas::Action::publish(Message::from(DroppedMonitor {
                             name: name.clone(),
-                            x: logical.x.round() as i64,
-                            y: logical.y.round() as i64,
+                            x: logical.x,
+                            y: logical.y,
                         }))
                         .and_capture(),
                     );
@@ -168,44 +185,54 @@ where
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
-        let c = crate::theme::colors(theme);
+        let colors = crate::theme::colors(theme);
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c.canvas);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), colors.canvas);
 
         let Some(layout) = Layout::new(&self.monitors, bounds) else {
             return vec![frame.into_geometry()];
         };
 
-        for (i, (name, m)) in self.monitors.iter().enumerate() {
-            let drag = state.drag.as_ref().filter(|d| d.index == i);
+        for (place, (name, monitor)) in self.monitors.iter().enumerate() {
+            let Some(logical) = drawn(monitor) else {
+                continue;
+            };
+            let drag = state.drag.as_ref().filter(|dragged| dragged.index == place);
             let rect = drag.map_or_else(
-                || layout.logical_to_canvas(m),
-                |d| Rectangle {
-                    x: d.cursor.x - d.offset.x,
-                    y: d.cursor.y - d.offset.y,
-                    width: m.width as f32 * layout.scale,
-                    height: m.height as f32 * layout.scale,
+                || layout.logical_to_canvas(logical),
+                |dragged| Rectangle {
+                    x: dragged.cursor.x - dragged.offset.x,
+                    y: dragged.cursor.y - dragged.offset.y,
+                    width: logical.width * layout.scale,
+                    height: logical.height * layout.scale,
                 },
             );
-            let (fill, edge) = if drag.is_some() {
-                (crate::theme::mix(c.surface, c.accent, 0.35), c.accent)
-            } else {
-                (c.surface, c.line)
+            let selected = self.selected.as_ref() == Some(name);
+            let (fill, edge, edge_width) = match (drag.is_some(), selected) {
+                (true, _) => (
+                    crate::theme::mix(colors.surface, colors.accent, 0.35),
+                    colors.accent,
+                    1.0,
+                ),
+                (false, true) => (colors.surface, colors.accent, 2.0),
+                (false, false) => (colors.surface, colors.line, 1.0),
             };
             frame.fill_rectangle(rect.position(), rect.size(), fill);
             frame.stroke_rectangle(
                 rect.position(),
                 rect.size(),
-                canvas::Stroke::default().with_width(1.0).with_color(edge),
+                canvas::Stroke::default()
+                    .with_width(edge_width)
+                    .with_color(edge),
             );
-            frame.fill_text(label(name.clone(), rect.center(), c.text, 14.0));
+            frame.fill_text(label(name.clone(), rect.center(), colors.text, 14.0));
             frame.fill_text(label(
                 format!(
-                    "{} × {} at {}, {}",
-                    m.width as i32, m.height as i32, m.x as i32, m.y as i32
+                    "{:.0} × {:.0} at {:.0}, {:.0}",
+                    monitor.width, monitor.height, monitor.x, monitor.y
                 ),
                 Point::new(rect.center().x, rect.center().y + 20.0),
-                c.muted,
+                colors.muted,
                 11.0,
             ));
         }
@@ -231,20 +258,30 @@ where
 #[derive(Debug, Clone)]
 pub struct DroppedMonitor {
     pub name: String,
-    pub x: i64,
-    pub y: i64,
+    /// Where it was let go, in logical pixels: snapping makes them whole.
+    pub x: f32,
+    pub y: f32,
 }
 
-/// Convenience constructor for the page view.
+/// The displays to arrange, `width` wide, the `selected` one outlined. Its
+/// height follows the width, not the arrangement, so it stays put while
+/// displays are dragged.
 pub fn monitor_canvas<Message>(
     monitors: &[(String, MonitorInfo)],
+    width: f32,
+    selected: Option<&str>,
 ) -> Canvas<MonitorProgram, Message>
 where
     Message: From<DroppedMonitor> + 'static,
 {
-    let height = if monitors.len() > 1 { 380.0 } else { 220.0 };
+    let height = if monitors.len() > 1 {
+        (width * 0.45).clamp(200.0, 380.0)
+    } else {
+        220.0
+    };
     Canvas::new(MonitorProgram {
         monitors: monitors.to_vec(),
+        selected: selected.map(str::to_string),
     })
     .width(Length::Fill)
     .height(Length::Fixed(height))

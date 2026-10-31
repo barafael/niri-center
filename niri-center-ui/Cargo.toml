@@ -20,6 +20,8 @@ workspace = true
 
 [dependencies]
 niri-center.workspace = true
+# checked float conversions (already here through iced)
+num-traits = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 iced = { workspace = true, features = [
@@ -34,6 +36,8 @@ iced = { workspace = true, features = [
     "tokio",
     "canvas",
     "advanced",
+    # finding a widget's place, to scroll to it
+    "selector",
 ] }
 # iced's executor: blocking work goes to its blocking pool, the wait before
 # a save is a timer on it, and the actors' channels
@@ -52,6 +56,7 @@ iced = { workspace = true, features = [
     "fira-sans",
     "canvas",
     "advanced",
+    "selector",
 ] }
 # the browser's timer, which iced's own uses
 wasmtimer = "0.4.2"

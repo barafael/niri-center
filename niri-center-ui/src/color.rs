@@ -4,6 +4,7 @@
 
 use iced::widget::canvas::{self, Canvas, Frame, Program, gradient};
 use iced::{Color, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use num_traits::ToPrimitive;
 
 use niri_center::color::Rgba;
 pub use niri_center::color::{Hsva, SWATCHES};
@@ -62,10 +63,10 @@ pub struct Picker {
     pub hsva: Hsva,
 }
 
-fn part_at(y: f32) -> Part {
-    if y < SQUARE + GAP / 2.0 {
+fn part_at(top: f32) -> Part {
+    if top < SQUARE + GAP / 2.0 {
         Part::Square
-    } else if y < SQUARE + GAP + BAR + GAP / 2.0 {
+    } else if top < SQUARE + GAP + BAR + GAP / 2.0 {
         Part::Hue
     } else {
         Part::Alpha
@@ -74,13 +75,13 @@ fn part_at(y: f32) -> Part {
 
 impl Picker {
     /// The color the pointer at `p` (canvas-local) picks on `part`.
-    fn pick(&self, part: Part, p: Point, width: f32) -> Hsva {
-        let fx = (p.x / width.max(1.0)).clamp(0.0, 1.0);
+    fn pick(&self, part: Part, point: Point, width: f32) -> Hsva {
+        let fx = (point.x / width.max(1.0)).clamp(0.0, 1.0);
         let mut hsva = self.hsva;
         match part {
             Part::Square => {
                 hsva.saturation = fx;
-                hsva.value = 1.0 - (p.y / SQUARE).clamp(0.0, 1.0);
+                hsva.value = 1.0 - (point.y / SQUARE).clamp(0.0, 1.0);
             }
             Part::Hue => hsva.hue = fx * 360.0,
             Part::Alpha => hsva.alpha = fx,
@@ -104,23 +105,23 @@ where
     ) -> Option<canvas::Action<Message>> {
         let local = cursor
             .position()
-            .map(|p| Point::new(p.x - bounds.x, p.y - bounds.y));
+            .map(|point| Point::new(point.x - bounds.x, point.y - bounds.y));
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let p = cursor.position_in(bounds)?;
-                let part = part_at(p.y);
+                let point = cursor.position_in(bounds)?;
+                let part = part_at(point.y);
                 state.dragging = Some(part);
                 Some(
-                    canvas::Action::publish(Message::from(self.pick(part, p, bounds.width)))
+                    canvas::Action::publish(Message::from(self.pick(part, point, bounds.width)))
                         .and_capture(),
                 )
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let part = state.dragging?;
-                let p = local?;
+                let point = local?;
                 Some(canvas::Action::publish(Message::from(self.pick(
                     part,
-                    p,
+                    point,
                     bounds.width,
                 ))))
             }
@@ -143,7 +144,7 @@ where
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
-        let c = crate::theme::colors(theme);
+        let colors = crate::theme::colors(theme);
         let mut frame = Frame::new(renderer, bounds.size());
         let width = bounds.width;
         let pure = shown(Hsva {
@@ -208,15 +209,15 @@ where
         // alpha over a checkerboard, so see-through colors read as such
         let alpha_y = hue_y + BAR + GAP;
         let cell = BAR / 2.0;
-        let columns = (width / cell).ceil() as usize;
+        let columns = (width / cell).ceil().to_usize().unwrap_or(0);
         for column in 0..columns {
-            let x = column as f32 * cell;
+            let left = column as f32 * cell;
             for row in 0..2 {
                 let light = (column + row) % 2 == 0;
                 frame.fill_rectangle(
-                    Point::new(x, (row as f32).mul_add(cell, alpha_y)),
-                    Size::new(cell.min(width - x), cell),
-                    if light { c.surface } else { c.line },
+                    Point::new(left, (row as f32).mul_add(cell, alpha_y)),
+                    Size::new(cell.min(width - left), cell),
+                    if light { colors.surface } else { colors.line },
                 );
             }
         }
@@ -251,9 +252,12 @@ where
 }
 
 /// A two-tone tick across a bar at `x`.
-fn bar_marker(frame: &mut Frame, x: f32, y: f32) {
-    let x = x.clamp(1.5, frame.width() - 1.5);
-    let line = canvas::Path::line(Point::new(x, y - 2.0), Point::new(x, y + BAR + 2.0));
+fn bar_marker(frame: &mut Frame, left: f32, top: f32) {
+    let left = left.clamp(1.5, frame.width() - 1.5);
+    let line = canvas::Path::line(
+        Point::new(left, top - 2.0),
+        Point::new(left, top + BAR + 2.0),
+    );
     frame.stroke(
         &line,
         canvas::Stroke::default()

@@ -9,10 +9,11 @@ use niri_center::outputs;
 use niri_center::page::Page;
 use niri_center::session::{SaveState, SaveWhen};
 use niri_center::settings;
+use num_traits::ToPrimitive;
 
 use crate::app::{App, Closing, ColorEdit, TOAST_SECONDS, error, info};
 use crate::message::Message;
-use crate::{color, controls, pages, shortcuts, tasks, view};
+use crate::{color, pages, shortcuts, tasks, view};
 
 /// One message, then the wait to save: a message that changed the config
 /// (re)starts it, and a tick comes when it is over.
@@ -26,7 +27,14 @@ pub fn step(state: &mut App, message: Message) -> Task<Message> {
                 pages::files::Message::CreateSnapshot | pages::files::Message::DeleteSnapshot(_)
             )
     );
+    let from_editor = matches!(message, Message::Animations(_));
+    let revision = state.store().map(niri_center::store::Store::revision);
     let task = update(state, message);
+    // the config changed under the Animations editor (Undo, a restore,
+    // another program): it shows the config again
+    if !from_editor && state.store().map(niri_center::store::Store::revision) != revision {
+        state.reload_animation_editor();
+    }
     // a save makes backups: the Files page lists them again
     if state.page == Page::Files
         && (lists_files || state.session.history.last().map(|entry| entry.time) != latest)
@@ -37,8 +45,10 @@ pub fn step(state: &mut App, message: Message) -> Task<Message> {
     // config alone; only an edit costs a copy
     state.session.edited();
     state.refresh_rows();
-    if let Some(e) = state.session.error.take() {
-        state.status = error(e.to_string());
+    state.refresh_motions();
+    pages::keybinds::refresh_picture(state);
+    if let Some(failure) = state.session.error.take() {
+        state.status = error(failure.to_string());
     }
     crate::history::want_texts(state);
     state.send_commands();
@@ -56,7 +66,7 @@ pub fn step(state: &mut App, message: Message) -> Task<Message> {
     let watching = state.page == Page::Events;
     if watching != state.watching {
         state.watching = watching;
-        let _ = state.ask_niri(niri::Command::Watch(watching));
+        state.tell_niri(niri::Command::Watch(watching));
     }
     let now_due = state.session.due();
     if now_due == due {
@@ -88,7 +98,7 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
     let Some(rest) = state.session.reply(reply) else {
         if started {
             // an editor filled before the config came reads it now
-            state.animation.reload(state.session.store.as_ref());
+            state.reload_animation_editor();
         }
         if history_changed {
             // the start of the history may read differently now
@@ -104,13 +114,12 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
         return Task::none();
     };
     match rest {
-        Reply::Loaded(Err(e)) => state.load_error = Some(e),
+        Reply::Loaded(Err(failure)) => state.load_error = Some(failure),
         Reply::Texts {
-            time,
             purpose: Purpose::Copy,
             files,
+            ..
         } => {
-            let _ = time;
             state.status = info("Copied the change as a diff.");
             return iced::clipboard::write(state.session.patch(&files));
         }
@@ -150,10 +159,10 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
                     .store
                     .as_mut()
                     .map_or(Ok(()), |store| store.stage_named(&name, &text))
-                    .map_err(|e| e.to_string())
+                    .map_err(|failure| failure.to_string())
             });
-            if let Err(e) = staged {
-                state.status = error(e);
+            if let Err(failure) = staged {
+                state.status = error(failure);
             }
         }
         Reply::Snapshot { files, .. } => {
@@ -163,13 +172,13 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
                     .store
                     .as_mut()
                     .map_or(Ok(()), |store| store.stage_snapshot(&files))
-                    .map_err(|e| e.to_string())
+                    .map_err(|failure| failure.to_string())
             });
-            if let Err(e) = staged {
-                state.status = error(e);
+            if let Err(failure) = staged {
+                state.status = error(failure);
             }
         }
-        Reply::Failed(e) => state.status = error(e),
+        Reply::Failed(failure) => state.status = error(failure),
         Reply::Loaded(Ok(_))
         | Reply::History(_)
         | Reply::Checked(_)
@@ -182,7 +191,7 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
 
 pub fn update(state: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::Disk(reply) => return disk_reply(state, *reply),
+        Message::Disk(reply) => return disk_reply(state, reply),
         Message::Page(page) => {
             state.page = page;
             if state
@@ -198,8 +207,11 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
                 Page::Displays => {
                     return state.ask_niri(niri::Command::Outputs);
                 }
+                // the editor opens on the animation as the config has it now
+                Page::Animations => {
+                    state.reload_animation_editor();
+                }
                 Page::Keybinds
-                | Page::Animations
                 | Page::Layout
                 | Page::Workspaces
                 | Page::Overview
@@ -222,9 +234,9 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::Setting(id, edit) => {
             follow_picker(state, &settings::DraftKey::Setting(id), &edit);
             if let Some(store) = &mut state.session.store
-                && let Err(e) = settings::edit(store, &mut state.session.drafts, id, edit)
+                && let Err(failure) = settings::edit(store, &mut state.session.drafts, id, edit)
             {
-                state.status = error(e);
+                state.status = error(failure);
             }
         }
         Message::Output(output, child, edit) => {
@@ -237,10 +249,10 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             // Edits waiting for theirs go first, so the trial is this alone
             let typed = matches!(edit, settings::Edit::Draft(_));
             let connected = &state.outputs;
-            if let Err(e) = state.session.change_display(typed, |store, drafts| {
+            if let Err(failure) = state.session.change_display(typed, |store, drafts| {
                 settings::edit_output(store, drafts, connected, &output, child, edit)
             }) {
-                state.status = error(e);
+                state.status = error(failure);
             }
         }
         Message::OpenColor(field, shown, target) => {
@@ -259,7 +271,7 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             open.hsva = hsva;
-            let filled = fill(&open.target, &hsva.hex());
+            let filled = open.target.filled(&hsva.hex());
             return update(state, filled);
         }
         Message::PickScreenColor => {
@@ -267,33 +279,37 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             return state.ask_niri(niri::Command::PickColor);
         }
         Message::ScreenColor(result) => match result {
-            Ok(Some([r, g, b])) => {
+            Ok(Some([red, green, blue])) => {
                 state.status = None;
-                if let Some(open) = &state.color {
-                    let picked = Color::from_rgba(r as f32, g as f32, b as f32, open.hsva.alpha);
+                // the portal's channels run from 0 to 1, well inside f32
+                if let Some(open) = &state.color
+                    && let (Some(red), Some(green), Some(blue)) =
+                        (red.to_f32(), green.to_f32(), blue.to_f32())
+                {
+                    let picked = Color::from_rgba(red, green, blue, open.hsva.alpha);
                     let hsva = color::hsva(picked, open.hsva);
                     return update(state, Message::ColorPicked(hsva));
                 }
             }
             Ok(None) => state.status = info("No color picked."),
-            Err(e) => state.status = error(format!("niri could not pick a color: {e}")),
+            Err(failure) => state.status = error(format!("niri could not pick a color: {failure}")),
         },
         Message::CloseColor => state.color = None,
-        Message::Browse { target, folder } => {
+        Message::Browse { to, folder } => {
             return Task::perform(niri_center::portal::choose(folder), move |result| {
-                Message::Browsed(target, result)
+                Message::Browsed(to, result)
             });
         }
-        Message::Browsed(target, result) => match result {
-            Ok(Some(path)) => return update(state, fill(&target, &path)),
+        Message::Browsed(to, result) => match result {
+            Ok(Some(path)) => return update(state, to.filled(&path)),
             Ok(None) => {}
-            Err(e) => state.status = error(e),
+            Err(failure) => state.status = error(failure),
         },
         Message::SystemLoaded(data) => {
             state.layout_box = iced::widget::combo_box::State::new(data.layouts.clone());
             state.option_box = iced::widget::combo_box::State::new(data.options.clone());
             state.startup.app_box = iced::widget::combo_box::State::new(data.apps.clone());
-            state.system = *data;
+            state.system = data;
             // apps are named by what is installed
             state.rows.by_app_from = None;
         }
@@ -305,7 +321,7 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
                 state.outputs = outputs;
                 state.displays.error = None;
             }
-            Err(e) => state.displays.error = Some(e),
+            Err(failure) => state.displays.error = Some(failure),
         },
         Message::Displays(message) => return crate::pages::displays::update(state, message),
         Message::TrialTick => state.session.trial_tick(),
@@ -319,7 +335,7 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
                 state.running = Some(data);
                 state.running_error = None;
             }
-            Err(e) => state.running_error = Some(e),
+            Err(failure) => state.running_error = Some(failure),
         },
         Message::LiveEvent(kind, text) => {
             if state.live_events.len() >= 120 {
@@ -388,10 +404,20 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             // niri starts it, so the pane runs outside this window's sandbox
             return state.ask_niri(niri::Command::Spawn(command));
         }
+        Message::OpenDocs(page) => {
+            if let Some(url) = page.docs() {
+                return state.ask_niri(niri::Command::OpenLink(url.to_string()));
+            }
+        }
+        Message::LinkOpened(result) => {
+            if let Err(failure) = result {
+                state.status = error(format!("Could not open the page: {failure}"));
+            }
+        }
         Message::PoppedOut(result) => {
             state.status = match result {
                 Ok(()) => info("Opened in its own window."),
-                Err(e) => error(format!("niri could not open the window: {e}")),
+                Err(failure) => error(format!("niri could not open the window: {failure}")),
             };
         }
         // ---- niri's config reloads ----
@@ -417,15 +443,15 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             match store.rename_node(&path, line, &name, &meant) {
                 // the fix is what lets niri read it again: saved as any edit
                 Ok(()) => state.session.health_fixed(),
-                Err(e) => state.status = error(e.to_string()),
+                Err(failure) => state.status = error(failure.to_string()),
             }
         }
         Message::FocusWindow(id) => {
             return state.ask_niri(niri::Command::Focus(id));
         }
         Message::WindowFocused(result) => {
-            if let Err(e) = result {
-                state.status = error(format!("niri did not switch to the window: {e}"));
+            if let Err(failure) = result {
+                state.status = error(format!("niri did not switch to the window: {failure}"));
             }
         }
         Message::ShowBrokenLine(shown) => state.broken_line_shown = shown,
@@ -447,7 +473,6 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             state.closing = Some(Closing::AfterSave);
         }
         Message::CloseCancel => state.closing = None,
-        Message::CloseDiscard => return iced::exit(),
         // ---- saving and the history ----
         Message::SaveTick => state.session.tick(),
         Message::SaveNow => {
@@ -458,8 +483,35 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::Undo => state.session.undo_latest(),
         Message::History(message) => return crate::history::update(state, message),
         Message::ShowSource(shown) => state.source_shown = shown,
+        Message::JumpToFile(index, path) => {
+            state.folded_files.remove(&path);
+            return jump_to_file(index);
+        }
+        Message::FoldFile(path, folded) => {
+            if folded {
+                state.folded_files.insert(path);
+            } else {
+                state.folded_files.remove(&path);
+            }
+        }
+        Message::PageDefaults(page) => {
+            if let Some(store) = &mut state.session.store {
+                let set: Vec<settings::Setting> = settings::set_on(store, page).collect();
+                for setting in set {
+                    if let Err(failure) = settings::edit(
+                        store,
+                        &mut state.session.drafts,
+                        setting,
+                        settings::Edit::Unset,
+                    ) {
+                        state.status = error(failure);
+                        break;
+                    }
+                }
+            }
+        }
         Message::ToggleSidebar => state.sidebar_folded = Some(!state.sidebar_folded()),
-        Message::PutBack => return iced::exit(),
+        Message::PutBack | Message::CloseDiscard => return iced::exit(),
         Message::CopyPending => {
             if state.store().is_some() {
                 let patch = state.session.pending_patch();
@@ -482,6 +534,11 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
                 *window = Some(id);
             }
         }
+        Message::NiriKeyboardLayout(index) => {
+            // the picture follows a switch made in niri
+            state.keybinds.niri_layout = Some(index);
+            state.keybinds.layout = None;
+        }
         Message::WindowClosed(id) => {
             if let Some((Some(window), was_shown)) = state.source_popped
                 && window == id
@@ -495,32 +552,6 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
         }
     }
     Task::none()
-}
-
-/// `target` with its hole (or its whole draft) filled with `value`: where a
-/// picked color or a chosen path goes.
-fn fill(target: &Message, value: &str) -> Message {
-    let edit = |edit: &settings::Edit| match edit {
-        settings::Edit::Draft(text) if text.contains(controls::HOLE) => {
-            settings::Edit::Draft(text.replace(controls::HOLE, value))
-        }
-        settings::Edit::Draft(_)
-        | settings::Edit::Switch(_)
-        | settings::Edit::OnOff(_)
-        | settings::Edit::Choice(_)
-        | settings::Edit::Unset => settings::Edit::Draft(value.to_string()),
-    };
-    #[allow(clippy::wildcard_enum_match_arm)] // other messages carry no text to fill
-    match target {
-        Message::Setting(id, draft) => Message::Setting(*id, edit(draft)),
-        Message::Output(output, child, draft) => {
-            Message::Output(output.clone(), *child, edit(draft))
-        }
-        Message::Startup(crate::pages::startup::Message::New(text)) => Message::Startup(
-            crate::pages::startup::Message::New(text.replace(controls::HOLE, value)),
-        ),
-        other => other.clone(),
-    }
 }
 
 /// Keep an open picker on the color its field now holds, when the field
@@ -559,14 +590,19 @@ fn on_shortcut(state: &mut App, shortcut: shortcuts::Shortcut) -> Task<Message> 
             }
         }
         Shortcut::Previous | Shortcut::Next if navigable => {
-            let current = pages.iter().position(|p| *p == state.page).unwrap_or(0);
-            let n = pages.len();
+            let current = pages
+                .iter()
+                .position(|page| *page == state.page)
+                .unwrap_or(0);
+            let count = pages.len();
             let next = if matches!(shortcut, Shortcut::Next) {
-                (current + 1) % n
+                (current + 1) % count
             } else {
-                (current + n - 1) % n
+                (current + count - 1) % count
             };
-            return update(state, Message::Page(pages[next]));
+            if let Some(&page) = pages.get(next) {
+                return update(state, Message::Page(page));
+            }
         }
         Shortcut::ToggleSource if navigable => {
             state.source_shown = !state.source_shown;
@@ -583,17 +619,21 @@ fn on_shortcut(state: &mut App, shortcut: shortcuts::Shortcut) -> Task<Message> 
                 iced::widget::operation::move_cursor_to_end(view::SEARCH_INPUT),
             );
         }
-        Shortcut::PopOutSource if navigable && state.shows_source() => {
+        Shortcut::PopOutSource
+            if navigable
+                && state.store().is_some()
+                && state.page.has_source()
+                && cfg!(not(target_arch = "wasm32")) =>
+        {
             return update(state, Message::PopOut(Page::Source));
         }
         Shortcut::PutBack if state.pane == Some(Page::Source) => return iced::exit(),
         Shortcut::Save => return update(state, Message::SaveNow),
         Shortcut::Undo if state.header_search.is_none() => return update(state, Message::Undo),
-        Shortcut::Close if state.session.trial.is_some() && state.header_search.is_none() => {
+        Shortcut::Close | Shortcut::Confirm
+            if state.session.trial.is_some() && state.header_search.is_none() =>
+        {
             return update(state, Message::EndTrial);
-        }
-        Shortcut::Confirm if state.session.trial.is_some() => {
-            return update(state, Message::KeepTrial);
         }
         Shortcut::Close if state.rules.dialog || state.rules.editor.is_some() => {
             return update(state, Message::Rules(pages::rules::Message::CancelEdit));
@@ -605,7 +645,6 @@ fn on_shortcut(state: &mut App, shortcut: shortcuts::Shortcut) -> Task<Message> 
         {
             return update(state, Message::Rules(pages::rules::Message::Up));
         }
-        Shortcut::Back => {}
         Shortcut::Up | Shortcut::Down
             if state.page == Page::Rules && state.rules_beside_list() && !state.floating() =>
         {
@@ -642,7 +681,8 @@ fn on_shortcut(state: &mut App, shortcut: shortcuts::Shortcut) -> Task<Message> 
                 };
             }
         }
-        Shortcut::Search
+        Shortcut::Back
+        | Shortcut::Search
         | Shortcut::Goto(_)
         | Shortcut::Previous
         | Shortcut::Next
@@ -655,4 +695,27 @@ fn on_shortcut(state: &mut App, shortcut: shortcuts::Shortcut) -> Task<Message> 
         | Shortcut::Undo => {}
     }
     Task::none()
+}
+
+/// Scroll the Config file page's list so file `index` starts at its top:
+/// where its section is laid out, less where the list's content starts.
+fn jump_to_file(index: usize) -> Task<Message> {
+    use iced::widget::scrollable::AbsoluteOffset;
+    use iced::widget::selector::{self, Target};
+    selector::find(selector::id(crate::source::section_id(index))).then(|section| {
+        selector::find(selector::id(crate::source::FILES_SCROLL)).then(move |list| {
+            match (&section, list) {
+                (Some(section), Some(Target::Scrollable { content_bounds, .. })) => {
+                    iced::widget::operation::scroll_to(
+                        crate::source::FILES_SCROLL,
+                        AbsoluteOffset {
+                            x: None,
+                            y: Some(section.bounds().y - content_bounds.y),
+                        },
+                    )
+                }
+                _ => Task::none(),
+            }
+        })
+    })
 }

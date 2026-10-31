@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# checked float-to-integer conversions (already here through iced)
+num-traits = "0.2"
 tracing.workspace = true
 tempfile = "3"
 # niri parses colors with this crate and version, so fields accept exactly what niri does
@@ -31,6 +33,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # xdg-desktop-portal: the file chooser behind Browse, the contrast preference
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "file_chooser", "settings"] }
 futures-util = { version = "0.3", default-features = false }
+xkbcommon = { version = "0.9.0", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
@@ -42,3 +45,7 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 # `?page=displays` in the demo's address opens that page; prefers-contrast
 web-sys = { version = "0.3", features = ["Window", "Location", "MediaQueryList"] }
+
+[dev-dependencies]
+# generated configs for the round-trip gate (tests/roundtrip_generated.rs)
+proptest = { version = "1.12", default-features = false, features = ["std"] }

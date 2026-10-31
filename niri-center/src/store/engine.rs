@@ -16,22 +16,22 @@
 use super::{Store, StoreError, Target, after_terminator, line_end, line_start, removal_span};
 use crate::diff::{Op, lcs_ops};
 use crate::include;
-use crate::kdl::{Node, Span, ValueKind, quoted};
+use crate::kdl::{Document, Node, Span, ValueKind, quoted};
 
 /// One step into nested config blocks: a node name, plus — for multipart
 /// sections like `output "eDP-1"` — the first argument that picks the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Block<'a> {
-    pub name: &'a str,
-    pub arg: Option<&'a str>,
+pub struct Block<'view> {
+    pub name: &'view str,
+    pub arg: Option<&'view str>,
 }
 
-impl<'a> Block<'a> {
-    pub const fn named(name: &'a str) -> Self {
+impl<'view> Block<'view> {
+    pub const fn named(name: &'view str) -> Self {
         Self { name, arg: None }
     }
 
-    pub const fn with_arg(name: &'a str, arg: &'a str) -> Self {
+    pub const fn with_arg(name: &'view str, arg: &'view str) -> Self {
         Self {
             name,
             arg: Some(arg),
@@ -52,10 +52,10 @@ pub struct Override {
 
 impl std::fmt::Display for Override {
     /// `output "eDP-1" (#3c0000)`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.block, quoted(&self.name))?;
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{} {}", self.block, quoted(&self.name))?;
         if let Some(value) = &self.value {
-            write!(f, " ({value})")?;
+            write!(out, " ({value})")?;
         }
         Ok(())
     }
@@ -101,33 +101,32 @@ impl Store {
 
     /// The `child` node niri applies, for reading its props or several args.
     pub fn setting_node(&self, chain: &[Block], child: &str) -> Option<&Node> {
-        self.applied(chain, child).map(|addr| self.node(&addr))
+        self.node(&self.applied(chain, child)?).ok()
     }
 
     /// Where the `child` niri applies is written: its file and 1-based line.
     pub fn setting_line(&self, chain: &[Block], child: &str) -> Option<(&std::path::Path, usize)> {
         let addr = self.applied(chain, child)?;
-        let start = self.node(&addr).node_span.start;
+        let start = self.node(&addr).ok()?.node_span.start;
         Some((
-            self.target_path(addr.target),
-            self.doc(addr.target).line_of(start),
+            self.target_path(addr.target).ok()?,
+            self.doc(addr.target).ok()?.line_of(start),
         ))
     }
 
     /// The top-level nodes named one of `names` that niri reads, in reading
     /// order, as their file and 1-based first and last lines.
     pub fn block_lines(&self, names: &[&str]) -> Vec<(&std::path::Path, usize, usize)> {
-        self.reading_order()
-            .iter()
-            .filter(|addr| names.contains(&self.node(addr).name.as_str()))
-            .map(|addr| {
-                let span = self.node(addr).node_span;
-                let doc = self.doc(addr.target);
-                (
-                    self.target_path(addr.target),
+        self.read_nodes()
+            .filter(|(_, node)| names.contains(&node.name.as_str()))
+            .filter_map(|(addr, node)| {
+                let span = node.node_span;
+                let (path, doc) = self.file(addr.target)?;
+                Some((
+                    path,
                     doc.line_of(span.start),
                     doc.line_of(span.end.saturating_sub(1).max(span.start)),
-                )
+                ))
             })
             .collect()
     }
@@ -136,8 +135,7 @@ impl Store {
     /// reading order: the outputs a config sets up, say.
     pub fn block_names(&self, name: &str) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        for addr in self.reading_order() {
-            let node = self.node(addr);
+        for (_, node) in self.read_nodes() {
             if node.name == name
                 && let Some(first) = node.args.first()
             {
@@ -154,10 +152,9 @@ impl Store {
     /// and 1-based line. For pointing at a misspelled node niri rejected.
     pub fn nodes_named(&self, name: &str) -> Vec<(&std::path::Path, usize)> {
         let mut found = Vec::new();
-        for target in self.targets() {
-            let doc = self.doc(target);
+        for (_, path, doc) in self.files() {
             for node in doc.iter_all().filter(|node| node.name == name) {
-                found.push((self.target_path(target), doc.line_of(node.node_span.start)));
+                found.push((path, doc.line_of(node.node_span.start)));
             }
         }
         found
@@ -199,7 +196,7 @@ impl Store {
             line,
         };
         let target = self.target_for_path(path).ok_or_else(not_found)?;
-        let doc = self.doc(target);
+        let doc = self.doc(target)?;
         let start = doc
             .iter_all()
             .find(|node| node.name == old && doc.line_of(node.node_span.start) == line)
@@ -209,7 +206,7 @@ impl Store {
         if !doc.source[start..].starts_with(old) {
             return Err(not_found());
         }
-        self.doc_mut(target)
+        self.doc_mut(target)?
             .splice(Span::new(start, start + old.len()), new);
         self.refresh(target)
     }
@@ -219,8 +216,7 @@ impl Store {
     /// `None` for `NAME null`, which takes a variable away.
     pub fn environment(&self) -> Vec<(String, Option<String>)> {
         let mut variables: Vec<(String, Option<String>)> = Vec::new();
-        for addr in self.reading_order() {
-            let node = self.node(addr);
+        for (_, node) in self.read_nodes() {
             if node.name != "environment" {
                 continue;
             }
@@ -253,8 +249,8 @@ impl Store {
 
     /// The current text of a loaded file.
     pub fn text_of(&self, path: &std::path::Path) -> Option<&str> {
-        self.target_for_path(path)
-            .map(|target| self.doc(target).source.as_str())
+        let target = self.target_for_path(path)?;
+        Some(self.doc(target).ok()?.source.as_str())
     }
 
     /// Whether niri sees `child` at all (presence flags like `tap`).
@@ -274,7 +270,7 @@ impl Store {
         let Some(addr) = self.applied(chain, child) else {
             return self.insert_setting(chain, child, args);
         };
-        let node = self.node(&addr);
+        let node = self.node(&addr)?;
         let name_end = node.node_span.start + node.name.len();
         let args_end = node
             .args
@@ -288,7 +284,7 @@ impl Store {
         } else {
             format!(" {args}")
         };
-        self.doc_mut(addr.target)
+        self.doc_mut(addr.target)?
             .splice(Span::new(name_end, args_end), &replacement);
         self.refresh(addr.target)
     }
@@ -311,10 +307,10 @@ impl Store {
     /// Remove every occurrence of `child`, so niri falls back to its default.
     pub fn unset_setting(&mut self, chain: &[Block], child: &str) -> Result<(), StoreError> {
         while let Some(addr) = self.applied(chain, child) {
-            let node_span = self.node(&addr).node_span;
-            let source = &self.doc(addr.target).source;
+            let node_span = self.node(&addr)?.node_span;
+            let source = &self.doc(addr.target)?.source;
             let (span, _) = removal_span(source, node_span);
-            self.doc_mut(addr.target).splice(span, "");
+            self.doc_mut(addr.target)?.splice(span, "");
             self.refresh(addr.target)?;
         }
         Ok(())
@@ -323,8 +319,7 @@ impl Store {
     /// The file holding the occurrence of `child` niri applies, or `None`
     /// when the config leaves it unset.
     pub fn setting_file(&self, chain: &[Block], child: &str) -> Option<&std::path::Path> {
-        self.applied(chain, child)
-            .map(|addr| self.target_path(addr.target))
+        self.target_path(self.applied(chain, child)?.target).ok()
     }
 
     /// The top-level blocks named one of `within` (`output "eDP-1"`) that
@@ -333,8 +328,7 @@ impl Store {
     pub fn overrides(&self, within: &[&str], inside: &[Block], child: &str) -> Vec<Override> {
         let wanted = Block::named(child);
         let mut found: Vec<Override> = Vec::new();
-        for addr in self.reading_order() {
-            let node = self.node(addr);
+        for (addr, node) in self.read_nodes() {
             if !within.contains(&node.name.as_str()) {
                 continue;
             }
@@ -346,9 +340,9 @@ impl Store {
             for step in inside {
                 blocks = blocks
                     .iter()
-                    .flat_map(|block| {
-                        self.node(block)
-                            .children
+                    .filter_map(|block| Some((block, self.node(block).ok()?)))
+                    .flat_map(|(block, node)| {
+                        node.children
                             .iter()
                             .enumerate()
                             .filter(|(_, child)| step_matches(child, step))
@@ -358,6 +352,7 @@ impl Store {
             }
             let Some(set) = blocks.iter().rev().find_map(|block| {
                 self.node(block)
+                    .ok()?
                     .children
                     .iter()
                     .rev()
@@ -428,78 +423,78 @@ impl Store {
         let Some(addr) = self.applied(chain, block) else {
             return self.insert_setting(chain, block, &braced);
         };
-        let node = self.node(&addr);
-        let source = &self.doc(addr.target).source;
+        let node = self.node(&addr)?;
+        let source = &self.doc(addr.target)?.source;
         let inline = !source[node.node_span.start..node.node_span.end].contains('\n');
         let Some(closing) = node.block.map(|block| block.end.saturating_sub(1)) else {
             let span = node.node_span;
-            self.doc_mut(addr.target)
+            self.doc_mut(addr.target)?
                 .splice(span, &format!("{block} {braced}"));
             return self.refresh(addr.target);
         };
-        let children: Vec<(&Node, (&str, &str))> = node
+        let children: Vec<&Node> = node
             .children
             .iter()
             .filter(|child| !child.disabled)
-            .map(|child| {
-                let value = child.args.first().map_or("", |value| value.kind.as_str());
-                (child, (child.name.as_str(), value))
-            })
             .collect();
-        let old: Vec<(&str, &str)> = children.iter().map(|(_, entry)| *entry).collect();
-        let new: Vec<(&str, &str)> = entries
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let text = |index: usize| format!("{} {}", new[index].0, new[index].1);
+        let text = |(name, value): &(String, String)| format!("{name} {value}");
         // entries kept stay as they are; between them, a changed entry is
         // written in place of an old one, the rest dropped or added there
-        let ops = lcs_ops(&old, &new);
+        let ops = lcs_ops(&children, entries, |child, (name, value)| {
+            child.name == *name
+                && child.args.first().map_or("", |first| first.kind.as_str()) == value
+        });
         let mut edits: Vec<(Span, String)> = Vec::new();
-        let mut last_old = None;
-        let mut index = 0;
-        while index < ops.len() {
-            if let Op::Keep(at, _) = ops[index] {
-                last_old = Some(at);
-                index += 1;
+        let mut last_old: Option<&Node> = None;
+        let mut rest_of_ops = ops.as_slice();
+        while let Some((op, after)) = rest_of_ops.split_first() {
+            if let Op::Keep(child, _) = op {
+                last_old = Some(child);
+                rest_of_ops = after;
                 continue;
             }
-            let (mut dropped, mut added) = (Vec::new(), Vec::new());
-            while let Some(op) = ops.get(index) {
-                match *op {
-                    Op::Keep(..) => break,
-                    Op::Del(at) => dropped.push(at),
-                    Op::Ins(at) => added.push(at),
-                }
-                index += 1;
-            }
+            let changed = rest_of_ops.iter().take_while(|op| !op.is_keep()).count();
+            let (run, after) = rest_of_ops.split_at(changed);
+            rest_of_ops = after;
+            let dropped: Vec<&Node> = run
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Del(child) => Some(**child),
+                    Op::Keep(..) | Op::Ins(_) => None,
+                })
+                .collect();
+            let added: Vec<&(String, String)> = run
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Ins(entry) => Some(*entry),
+                    Op::Keep(..) | Op::Del(_) => None,
+                })
+                .collect();
             let paired = dropped.len().min(added.len());
-            for (&at, &entry) in dropped.iter().zip(&added) {
-                edits.push((children[at].0.node_span, text(entry)));
+            for (child, entry) in dropped.iter().zip(&added) {
+                edits.push((child.node_span, text(entry)));
             }
-            for &at in &dropped[paired..] {
-                edits.push((
-                    removal_span(source, children[at].0.node_span).0,
-                    String::new(),
-                ));
+            for child in dropped.iter().skip(paired) {
+                edits.push((removal_span(source, child.node_span).0, String::new()));
             }
-            let rest: Vec<String> = added[paired..].iter().map(|&entry| text(entry)).collect();
+            let rest: Vec<String> = added.iter().skip(paired).map(|entry| text(entry)).collect();
             if !rest.is_empty() {
-                let anchor = match (paired.checked_sub(1).map(|k| dropped[k]), last_old) {
-                    (Some(at), _) | (None, Some(at)) => Anchor::After(children[at].0.node_span),
-                    (None, None) => children
-                        .first()
-                        .map_or(Anchor::Empty(closing), |(first, _)| {
-                            Anchor::Before(first.node_span)
-                        }),
+                let last_paired = paired
+                    .checked_sub(1)
+                    .and_then(|place| dropped.get(place).copied());
+                let anchor = match last_paired.or(last_old) {
+                    Some(child) => Anchor::After(child.node_span),
+                    None => children.first().map_or(Anchor::Empty(closing), |first| {
+                        Anchor::Before(first.node_span)
+                    }),
                 };
                 edits.push(insertion(source, inline, anchor, &rest));
             }
-            if let Some(&at) = dropped.last() {
-                last_old = Some(at);
+            if let Some(&child) = dropped.last() {
+                last_old = Some(child);
             }
         }
-        let doc = self.doc_mut(addr.target);
+        let doc = self.doc_mut(addr.target)?;
         for (span, text) in edits {
             doc.splice(span, &text);
         }
@@ -525,8 +520,11 @@ impl Store {
         if visiting.contains(&target) {
             return;
         }
+        let Some((path, doc)) = self.file(target) else {
+            return;
+        };
         visiting.push(target);
-        for (index, node) in self.doc(target).roots.iter().enumerate() {
+        for (index, node) in doc.roots.iter().enumerate() {
             if node.disabled {
                 continue;
             }
@@ -544,7 +542,7 @@ impl Store {
                     ValueKind::Quoted(rel) => Some(rel.as_str()),
                     ValueKind::Bare(_) | ValueKind::Number(_) => None,
                 })
-                .map(|rel| include::include_path(self.target_path(target), rel))
+                .map(|rel| include::include_path(path, rel))
                 .and_then(|file| self.target_for_path(&file));
             if let Some(included) = included {
                 self.walk(included, visiting, out);
@@ -553,10 +551,30 @@ impl Store {
         visiting.pop();
     }
 
-    pub(super) fn target_path(&self, target: Target) -> &std::path::Path {
+    /// Each loaded file, main first: its target, path and document. They
+    /// come from the list itself, so none can be gone.
+    pub(super) fn files(&self) -> impl Iterator<Item = (Target, &std::path::Path, &Document)> {
+        self.loaded().map(|file| (file.target, file.path, file.doc))
+    }
+
+    /// The path and document of the file `target` stands for.
+    pub(super) fn file(&self, target: Target) -> Option<(&std::path::Path, &Document)> {
+        Some((self.target_path(target).ok()?, self.doc(target).ok()?))
+    }
+
+    /// The active top-level nodes in reading order, with their addresses.
+    /// The order is worked out from the documents as they are, so every
+    /// address in it finds its node.
+    pub(super) fn read_nodes(&self) -> impl Iterator<Item = (&NodeAddr, &Node)> {
+        self.reading_order()
+            .iter()
+            .filter_map(|addr| Some((addr, self.node(addr).ok()?)))
+    }
+
+    pub(super) fn target_path(&self, target: Target) -> Result<&std::path::Path, StoreError> {
         match target {
-            Target::Main => &self.path,
-            Target::Included(i) => &self.included[i].path,
+            Target::Main => Ok(&self.path),
+            Target::Included(index) => Ok(&self.included(index)?.path),
         }
     }
 
@@ -571,13 +589,15 @@ impl Store {
             .map(Target::Included)
     }
 
-    pub(super) fn node(&self, addr: &NodeAddr) -> &Node {
-        let doc = self.doc(addr.target);
-        let mut node = &doc.roots[addr.path[0]];
-        for &index in &addr.path[1..] {
-            node = &node.children[index];
+    /// The node at `addr`, found anew; `Gone` when an edit since moved it.
+    pub(super) fn node(&self, addr: &NodeAddr) -> Result<&Node, StoreError> {
+        let doc = self.doc(addr.target)?;
+        let (&root, below) = addr.path.split_first().ok_or(StoreError::Gone)?;
+        let mut node = doc.roots.get(root).ok_or(StoreError::Gone)?;
+        for &index in below {
+            node = node.children.get(index).ok_or(StoreError::Gone)?;
         }
-        node
+        Ok(node)
     }
 
     /// Every active block matching `chain`, in reading order.
@@ -586,16 +606,18 @@ impl Store {
             return Vec::new();
         };
         let mut matched: Vec<NodeAddr> = self
-            .reading_order()
-            .iter()
-            .filter(|addr| step_matches(self.node(addr), first))
-            .cloned()
+            .read_nodes()
+            .filter(|(_, node)| step_matches(node, first))
+            .map(|(addr, _)| addr.clone())
             .collect();
         let mut parent_name = first.name;
         for step in rest {
             let mut next = Vec::new();
-            for parent in &matched {
-                for (index, child) in self.node(parent).children.iter().enumerate() {
+            for (parent, node) in matched
+                .iter()
+                .filter_map(|parent| Some((parent, self.node(parent).ok()?)))
+            {
+                for (index, child) in node.children.iter().enumerate() {
                     if step_matches(child, step) {
                         next.push(parent.child(index));
                     }
@@ -616,15 +638,15 @@ impl Store {
         let step = Block::named(child);
         if chain.is_empty() {
             return self
-                .reading_order()
-                .iter()
-                .rev()
-                .find(|addr| step_matches(self.node(addr), &step))
-                .cloned();
+                .read_nodes()
+                .filter(|(_, node)| step_matches(node, &step))
+                .last()
+                .map(|(addr, _)| addr.clone());
         }
         self.matching_blocks(chain).iter().rev().find_map(|block| {
             let index = self
                 .node(block)
+                .ok()?
                 .children
                 .iter()
                 .rposition(|node| step_matches(node, &step))?;
@@ -647,14 +669,18 @@ impl Store {
         } else {
             format!("{child} {args}")
         };
+        // the deepest block of the chain that is there, the rest made in it
         for depth in (1..=chain.len()).rev() {
-            if let Some(parent) = self.matching_blocks(&chain[..depth]).pop() {
-                let lines = nested_lines(&chain[depth..], &line);
+            let Some((there, missing)) = chain.split_at_checked(depth) else {
+                continue;
+            };
+            if let Some(parent) = self.matching_blocks(there).pop() {
+                let lines = nested_lines(missing, &line);
                 return self.insert_into_block(&parent, &lines);
             }
         }
         let lines = nested_lines(chain, &line);
-        let doc = self.doc_mut(Target::Main);
+        let doc = self.doc_mut(Target::Main)?;
         let end = doc.source.len();
         let lead = if doc.source.is_empty() || doc.source.ends_with('\n') {
             ""
@@ -675,11 +701,11 @@ impl Store {
         parent: &NodeAddr,
         lines: &[String],
     ) -> Result<(), StoreError> {
-        let node = self.node(parent);
+        let node = self.node(parent)?;
         let block = node.block.ok_or_else(|| StoreError::BlockMissing {
             name: node.name.clone(),
         })?;
-        let source = &self.doc(parent.target).source;
+        let source = &self.doc(parent.target)?.source;
         let parent_indent = indentation(source, node.node_span.start);
         let child_indent = format!("{parent_indent}    ");
         let indented = |lines: &[String]| {
@@ -713,7 +739,7 @@ impl Store {
                 format!("\n{}\n{parent_indent}", indented(lines)),
             )
         };
-        self.doc_mut(parent.target).splice(span, &text);
+        self.doc_mut(parent.target)?.splice(span, &text);
         self.refresh(parent.target)
     }
 }
@@ -803,6 +829,6 @@ fn insertion(source: &str, inline: bool, anchor: Anchor, entries: &[String]) -> 
 pub(super) fn indentation(source: &str, pos: usize) -> String {
     source[line_start(source, pos)..]
         .chars()
-        .take_while(|c| matches!(c, ' ' | '\t'))
+        .take_while(|character| matches!(character, ' ' | '\t'))
         .collect()
 }

@@ -21,9 +21,12 @@ lint-nursery:
 fmt:
     cargo fmt
 
-# The CI gate: formatting, then clippy, then tests. Stops at the first failure.
+# The CI gate: formatting, the ast-grep rules, clippy, then tests. Stops at
+# the first failure.
 check:
     cargo fmt --check
+    ast-grep test
+    ast-grep scan
     cargo clippy --workspace --all-targets -- -D warnings
     cargo clippy -p niri-center-ui --target wasm32-unknown-unknown -- -D warnings
     cargo test --workspace

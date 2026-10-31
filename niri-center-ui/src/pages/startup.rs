@@ -54,7 +54,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                     state.startup.command.clear();
                     state.status = info(format!("Added {command}."));
                 }
-                Err(e) => state.status = error(e.to_string()),
+                Err(failure) => state.status = error(failure.to_string()),
             }
         }
         Message::AddApp(command) => {
@@ -79,7 +79,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
     Task::none()
 }
 
-pub fn page<'a>(state: &'a App, store: &'a Store) -> El<'a> {
+pub fn page<'app>(state: &'app App, store: &'app Store) -> El<'app> {
     let rows = store.autostart_rows();
     let query = state.startup.search.trim().to_lowercase();
     let mut entries: Vec<El<'_>> = Vec::new();
@@ -148,9 +148,9 @@ pub fn page<'a>(state: &'a App, store: &'a Store) -> El<'a> {
                         small(
                             "Browse",
                             AppMessage::Browse {
-                                target: Box::new(AppMessage::Startup(Message::New(
+                                to: crate::controls::Destination::StartupCommand(
                                     crate::controls::HOLE.to_string()
-                                ))),
+                                ),
                                 folder: false,
                             }
                         ),

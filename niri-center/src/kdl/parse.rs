@@ -24,9 +24,9 @@ pub struct ParseError {
 }
 
 impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
-            f,
+            out,
             "KDL parse error at byte {}: {}",
             self.offset, self.message
         )
@@ -37,22 +37,22 @@ impl std::error::Error for ParseError {}
 
 /// Parse `source` into a lossless [`Document`].
 pub fn parse(source: &str) -> Result<Document, ParseError> {
-    let mut p = Parser {
+    let mut parser = Parser {
         src: source,
         pos: 0,
         next_id: 0,
     };
-    let roots = p.parse_node_list(true)?;
+    let roots = parser.parse_node_list(true)?;
     Ok(Document::new(source.to_string(), roots))
 }
 
-struct Parser<'a> {
-    src: &'a str,
+struct Parser<'view> {
+    src: &'view str,
     pos: usize,
     next_id: usize,
 }
 
-impl<'a> Parser<'a> {
+impl<'view> Parser<'view> {
     fn peek(&self) -> Option<u8> {
         self.src.as_bytes().get(self.pos).copied()
     }
@@ -68,16 +68,16 @@ impl<'a> Parser<'a> {
     /// EOF without consuming it, and returns whether it stopped at a line break.
     fn skip_inline(&mut self) -> bool {
         loop {
-            let Some(c) = self.peek() else {
+            let Some(byte) = self.peek() else {
                 return true; // EOF counts as end-of-line
             };
-            match c {
+            match byte {
                 b' ' | b'\t' | b'\r' => self.pos += 1,
                 b'\n' => return true,
                 b'/' if self.src.as_bytes().get(self.pos + 1) == Some(&b'/') => {
                     self.pos += 2;
-                    while let Some(b) = self.peek() {
-                        if b == b'\n' {
+                    while let Some(byte) = self.peek() {
+                        if byte == b'\n' {
                             break;
                         }
                         self.pos += 1;
@@ -181,27 +181,27 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 Some(b'"') => {
-                    let v = self.parse_string()?;
-                    last_end = v.span.end;
-                    args.push(v);
+                    let value = self.parse_string()?;
+                    last_end = value.span.end;
+                    args.push(value);
                 }
                 Some(b'r') if self.starts_raw_string() => {
-                    let v = self.parse_string()?;
-                    last_end = v.span.end;
-                    args.push(v);
+                    let value = self.parse_string()?;
+                    last_end = value.span.end;
+                    args.push(value);
                 }
                 Some(b'-') | Some(b'+') | Some(b'0'..=b'9') => {
-                    let v = self.parse_number()?;
-                    last_end = v.span.end;
-                    args.push(v);
+                    let value = self.parse_number()?;
+                    last_end = value.span.end;
+                    args.push(value);
                 }
-                Some(c) if is_ident_start(c) => {
+                Some(byte) if is_ident_start(byte) => {
                     // Decide: property, bare-ident argument, or new sibling.
                     let token_start = self.pos;
                     let (_, ident_end) = read_ident_at(self.src, token_start)?;
                     let saved = self.pos;
                     self.pos = ident_end;
-                    let at_newline = self.skip_inline();
+                    self.skip_inline();
                     let next = self.peek();
                     self.pos = saved; // restore, we may consume or defer
                     match next {
@@ -220,7 +220,6 @@ impl<'a> Parser<'a> {
                         }
                         Some(b'\n' | b';' | b'}') | None => {
                             // bare-identifier argument (end of node / block / file)
-                            let _ = at_newline;
                             let text = self.read_ident()?;
                             args.push(Value {
                                 kind: ValueKind::Bare(text),
@@ -236,10 +235,10 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                Some(c) => {
+                Some(byte) => {
                     return Err(self.err(format!(
                         "unexpected byte `{}` in node `{name}`",
-                        char::from(c)
+                        char::from(byte)
                     )));
                 }
             }
@@ -268,7 +267,7 @@ impl<'a> Parser<'a> {
             // everything up to the next token IS the value (`repeat=false`,
             // `hotkey-overlay-title=null`, `allow-when-locked=true`), even when
             // a `{` block or another property follows on the same line.
-            Some(c) if is_ident_start(c) => {
+            Some(byte) if is_ident_start(byte) => {
                 let start = self.pos;
                 let text = self.read_ident()?;
                 let end = self.pos;
@@ -316,23 +315,25 @@ impl<'a> Parser<'a> {
         self.pos += 1; // opening quote
         let content_start = self.pos;
         let bytes = self.src.as_bytes();
-        let mut i = self.pos;
+        let mut at = self.pos;
         loop {
-            if i >= bytes.len() {
+            let Some(&byte) = bytes.get(at) else {
                 return Err(self.err("unterminated raw string"));
-            }
-            if bytes[i] == b'"'
-                && i + 1 + hashes <= bytes.len()
-                && bytes[i + 1..i + 1 + hashes].iter().all(|&b| b == b'#')
+            };
+            // a quote closes it when as many hashes follow as opened it
+            if byte == b'"'
+                && bytes
+                    .get(at + 1..at + 1 + hashes)
+                    .is_some_and(|run| run.iter().all(|&byte| byte == b'#'))
             {
-                let content = self.src[content_start..i].to_string();
-                self.pos = i + 1 + hashes;
+                let content = self.src[content_start..at].to_string();
+                self.pos = at + 1 + hashes;
                 return Ok(Value {
                     kind: ValueKind::Quoted(content),
                     span: Span::new(start, self.pos),
                 });
             }
-            i += 1;
+            at += 1;
         }
     }
 
@@ -399,14 +400,14 @@ impl<'a> Parser<'a> {
                     .src
                     .as_bytes()
                     .get(self.pos + 1)
-                    .is_some_and(|b| b.is_ascii_digit()) =>
+                    .is_some_and(u8::is_ascii_digit) =>
             {
                 self.pos += 1;
             }
             _ => {}
         }
         let digits_start = self.pos;
-        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+        while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
             self.pos += 1;
         }
         if self.pos == digits_start {
@@ -415,7 +416,7 @@ impl<'a> Parser<'a> {
         // fraction
         if self.peek() == Some(b'.') {
             self.pos += 1;
-            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                 self.pos += 1;
             }
         }
@@ -425,14 +426,9 @@ impl<'a> Parser<'a> {
             if matches!(self.src.as_bytes().get(exp), Some(b'+') | Some(b'-')) {
                 exp += 1;
             }
-            if self
-                .src
-                .as_bytes()
-                .get(exp)
-                .is_some_and(|b| b.is_ascii_digit())
-            {
+            if self.src.as_bytes().get(exp).is_some_and(u8::is_ascii_digit) {
                 self.pos = exp;
-                while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                     self.pos += 1;
                 }
             }
@@ -450,8 +446,8 @@ impl<'a> Parser<'a> {
     }
 }
 
-const fn is_ident_start(c: u8) -> bool {
-    c.is_ascii_alphabetic() || c == b'_'
+const fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
 }
 
 /// Scan an identifier at `pos`; returns its text and end offset.
@@ -470,10 +466,10 @@ fn read_ident_at(src: &str, pos: usize) -> Result<(String, usize), ParseError> {
         });
     }
     let mut end = pos + 1;
-    while let Some(&b) = bytes.get(end) {
+    while let Some(&byte) = bytes.get(end) {
         // `+` is not KDL-standard, but niri keybind names are bare
         // identifiers like `Mod+Space` / `Super+Shift+Enter`.
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'+' {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'+' {
             end += 1;
         } else {
             break;

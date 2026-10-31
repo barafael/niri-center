@@ -17,27 +17,33 @@ const fn pad() -> f32 {
 
 fn plot_area(bounds: Rectangle) -> Rectangle {
     // local coordinates: the frame is translated by the widget bounds at draw
-    let p = pad();
+    let padding = pad();
     Rectangle {
-        x: p,
-        y: p,
-        width: 2.0f32.mul_add(-p, bounds.width).max(1.0),
-        height: 2.0f32.mul_add(-p, bounds.height).max(1.0),
+        x: padding,
+        y: padding,
+        width: 2.0f32.mul_add(-padding, bounds.width).max(1.0),
+        height: 2.0f32.mul_add(-padding, bounds.height).max(1.0),
     }
 }
 
-fn to_plot(p: (f32, f32), area: Rectangle) -> Point {
+fn to_plot(point: (f32, f32), area: Rectangle) -> Point {
     Point::new(
-        p.0.mul_add(area.width, area.x),
-        p.1.mul_add(-area.height, area.y + area.height),
+        point.0.mul_add(area.width, area.x),
+        point.1.mul_add(-area.height, area.y + area.height),
     )
 }
 
-/// Sample a cubic bezier with endpoints (0,0)→(1,1) at `t`.
-fn bezier(c: (f32, f32, f32, f32), t: f32) -> (f32, f32) {
-    let u = 1.0 - t;
-    let x = (t * t).mul_add(t, (3.0 * u * t * t).mul_add(c.2, 3.0 * u * u * t * c.0));
-    let y = (t * t).mul_add(t, (3.0 * u * t * t).mul_add(c.3, 3.0 * u * u * t * c.1));
+/// Sample a cubic bezier with endpoints (0,0)→(1,1) at `along`.
+fn bezier(controls: (f32, f32, f32, f32), along: f32) -> (f32, f32) {
+    let rest = 1.0 - along;
+    let x = (along * along).mul_add(
+        along,
+        (3.0 * rest * along * along).mul_add(controls.2, 3.0 * rest * rest * along * controls.0),
+    );
+    let y = (along * along).mul_add(
+        along,
+        (3.0 * rest * along * along).mul_add(controls.3, 3.0 * rest * rest * along * controls.1),
+    );
     (x, y)
 }
 
@@ -80,21 +86,26 @@ where
         let area = plot_area(bounds);
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let p = cursor.position_in(bounds)?;
+                let pointer = cursor.position_in(bounds)?;
                 let handles = self.handles(area);
-                let index = (0..2).find(|&i| handles[i].distance(p) < 12.0)?;
+                let index = handles
+                    .iter()
+                    .position(|handle| handle.distance(pointer) < 12.0)?;
                 state.dragging = Some(index);
                 Some(canvas::Action::capture())
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 let index = state.dragging?;
-                let x = ((position.x - bounds.x - area.x) / area.width).clamp(0.0, 1.0);
+                let across = ((position.x - bounds.x - area.x) / area.width).clamp(0.0, 1.0);
                 // y may overshoot: niri's curves can bounce past the end
-                let y = ((area.y + area.height - (position.y - bounds.y)) / area.height)
+                let up = ((area.y + area.height - (position.y - bounds.y)) / area.height)
                     .clamp(-0.5, 1.5);
                 let mut points = self.custom;
-                points[index * 2] = (x * 100.0).round() / 100.0;
-                points[index * 2 + 1] = (y * 100.0).round() / 100.0;
+                // each handle is a pair of the four numbers: x then y
+                if let Some([handle_x, handle_y]) = points.as_chunks_mut::<2>().0.get_mut(index) {
+                    *handle_x = (across * 100.0).round() / 100.0;
+                    *handle_y = (up * 100.0).round() / 100.0;
+                }
                 Some(canvas::Action::publish(Message::from(Bezier(points))))
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -117,23 +128,25 @@ where
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let c = crate::theme::colors(theme);
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c.canvas);
+        let colors = crate::theme::colors(theme);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), colors.canvas);
         let area = plot_area(bounds);
 
         // grid: x/y at 0, 0.5, 1
         for step in [0.0f32, 0.5, 1.0] {
             let vx = to_plot((step, 0.0), area).x;
             let hy = to_plot((0.0, step), area).y;
-            let grid = Path::new(|b| {
-                b.move_to(Point::new(vx, area.y));
-                b.line_to(Point::new(vx, area.y + area.height));
-                b.move_to(Point::new(area.x, hy));
-                b.line_to(Point::new(area.x + area.width, hy));
+            let grid = Path::new(|builder| {
+                builder.move_to(Point::new(vx, area.y));
+                builder.line_to(Point::new(vx, area.y + area.height));
+                builder.move_to(Point::new(area.x, hy));
+                builder.line_to(Point::new(area.x + area.width, hy));
             });
             frame.stroke(
                 &grid,
-                canvas::Stroke::default().with_width(1.0).with_color(c.line),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(colors.line),
             );
         }
 
@@ -145,13 +158,17 @@ where
                 None if highlighted => self.custom.into(),
                 None => continue,
             };
-            let color = if highlighted { c.accent } else { c.line };
+            let color = if highlighted {
+                colors.accent
+            } else {
+                colors.line
+            };
             let width = if highlighted { 2.5 } else { 1.0 };
-            let path = Path::new(|b| {
+            let path = Path::new(|builder| {
                 let steps = 60u32;
-                b.move_to(to_plot(bezier(curve, 0.0), area));
-                for i in 1..=steps {
-                    b.line_to(to_plot(bezier(curve, i as f32 / steps as f32), area));
+                builder.move_to(to_plot(bezier(curve, 0.0), area));
+                for step in 1..=steps {
+                    builder.line_to(to_plot(bezier(curve, step as f32 / steps as f32), area));
                 }
             });
             frame.stroke(
@@ -164,20 +181,20 @@ where
 
         if self.selected == Curve::CubicBezier {
             let [first, second] = self.handles(area);
-            let arms = Path::new(|b| {
-                b.move_to(to_plot((0.0, 0.0), area));
-                b.line_to(first);
-                b.move_to(to_plot((1.0, 1.0), area));
-                b.line_to(second);
+            let arms = Path::new(|builder| {
+                builder.move_to(to_plot((0.0, 0.0), area));
+                builder.line_to(first);
+                builder.move_to(to_plot((1.0, 1.0), area));
+                builder.line_to(second);
             });
             frame.stroke(
                 &arms,
                 canvas::Stroke::default()
                     .with_width(1.0)
-                    .with_color(c.pending),
+                    .with_color(colors.pending),
             );
             for handle in [first, second] {
-                frame.fill(&Path::circle(handle, 6.0), c.pending);
+                frame.fill(&Path::circle(handle, 6.0), colors.pending);
             }
         }
 
@@ -190,10 +207,10 @@ where
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        let near = cursor.position_in(bounds).is_some_and(|p| {
+        let near = cursor.position_in(bounds).is_some_and(|pointer| {
             self.handles(plot_area(bounds))
                 .iter()
-                .any(|handle| handle.distance(p) < 12.0)
+                .any(|handle| handle.distance(pointer) < 12.0)
         });
         if state.dragging.is_some() {
             mouse::Interaction::Grabbing
@@ -222,44 +239,43 @@ impl<Message> Program<Message, Theme, Renderer> for SpringProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
+        // 1.2 s in steps of 1/240 s
+        const STEPS: u16 = 288;
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let c = crate::theme::colors(theme);
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c.canvas);
+        let colors = crate::theme::colors(theme);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), colors.canvas);
         let area = plot_area(bounds);
 
-        // mass-spring: x'' + 2ζω x' + ω²x = 0, x(0)=1, x'(0)=0
-        let omega = self.stiffness.max(1.0).sqrt();
-        let zeta = self.damping_ratio;
-        let dt = 1.0 / 240.0;
-        let steps = (1.2 / dt) as usize;
-        let (mut x, mut v) = (1.0f32, 0.0f32);
-        let mut samples = vec![(0.0f32, x)];
-        for i in 1..=steps {
-            let a = (omega * omega).mul_add(-x, -2.0 * zeta * omega * v);
-            v = a.mul_add(dt, v);
-            x = v.mul_add(dt, x);
-            samples.push(((i as f32 * dt) / 1.2, x));
-        }
-        let path = Path::new(|b| {
-            b.move_to(to_plot((samples[0].0, samples[0].1), area));
-            for (t, s) in samples.iter().skip(1) {
-                b.line_to(to_plot((*t, *s), area));
+        // the spring as niri moves it, over 1.2 s
+        let spring = niri_center::animations::Spring {
+            damping_ratio: self.damping_ratio,
+            stiffness: self.stiffness,
+            epsilon: 0.0001,
+        };
+        let path = Path::new(|builder| {
+            builder.move_to(to_plot((0.0, 1.0), area));
+            for step in 1..=STEPS {
+                let along = f32::from(step) / f32::from(STEPS);
+                let offset = niri_center::motion::spring_offset(spring, along * 1.2);
+                builder.line_to(to_plot((along, offset), area));
             }
         });
         frame.stroke(
             &path,
             canvas::Stroke::default()
                 .with_width(2.0)
-                .with_color(c.success),
+                .with_color(colors.success),
         );
         // settled-value line at the bottom (y = 0)
-        let target = Path::new(|b| {
-            b.move_to(Point::new(area.x, area.y + area.height));
-            b.line_to(Point::new(area.x + area.width, area.y + area.height));
+        let target = Path::new(|builder| {
+            builder.move_to(Point::new(area.x, area.y + area.height));
+            builder.line_to(Point::new(area.x + area.width, area.y + area.height));
         });
         frame.stroke(
             &target,
-            canvas::Stroke::default().with_width(1.0).with_color(c.line),
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(colors.line),
         );
 
         vec![frame.into_geometry()]

@@ -2,17 +2,20 @@
 
 How code is written and checked here. How claims about it are justified is
 `AGENTS.md`; why the app is shaped as it is lives in the decision records,
-`docs/ADR-*.md`.
+`docs/ADR-*.md`. They state intent and its reasons and name no file, line or
+symbol of the code, so a refactor leaves them alone.
 
 ## Building and running
 
-Requires [`just`](https://github.com/casey/just) (`cargo install just`), and
-for the browser demo [`wasm-pack`](https://github.com/drager/wasm-pack)
-(`cargo install wasm-pack`).
+Requires [`just`](https://github.com/casey/just) (`cargo install just`),
+[`ast-grep`](https://ast-grep.github.io) for `just check` (`cargo install
+ast-grep --locked`, or the distribution's package), and for the browser
+demo [`wasm-pack`](https://github.com/drager/wasm-pack) (`cargo install
+wasm-pack`).
 
 ```sh
 just run           # or: cargo run          (starts the app)
-just check         # fmt + clippy + tests: the CI gate
+just check         # fmt + ast-grep rules + clippy + tests: the CI gate
 just audit         # cargo audit + cargo deny
 just ui-shots      # render every screen headlessly to target/ui-shots
 just web           # the browser demo, into target/site
@@ -58,11 +61,14 @@ Reminders).
 ## Code rules
 
 - Errors are `thiserror` enums with a variant per case, never `String`s.
-- No `unwrap`/`expect`/`panic!` in library code (tests may).
+- No `unwrap`/`expect`/`panic!` outside tests. Clippy denies them, and
+  `clippy.toml` lets tests have them.
 - `pub` only where a crate boundary needs it.
-- Full words in names (`index`, not `idx`).
+- Full words in names (`index`, not `idx`), closure parameters and
+  lifetimes included (`'app`, `'store`): a name says what it holds. `x` and
+  `y` stay for coordinates, where they are the words.
 - Parsing is the hand-written parser in `niri-center/src/kdl`; the only
-  regexes are niri's own `match` patterns (see `docs/ADR-lossless-edits.md`).
+  regexes are niri's own `match` patterns.
   Source coloring (`highlight.rs`) is a display-only scanner, never a way
   to read the config.
 - A string that names one of a set the code knows at compile time is an
@@ -72,13 +78,36 @@ Reminders).
   sizes stay `(name, value)` text: a number type would not keep what was
   written (`1.0`, `0.50`), and the edit compares entries as written.
 - Code that needs no iced type goes in the library, where it is tested
-  without a window (`docs/ADR-crates-and-actors.md`).
+  without a window.
+- No `Arc`, `Mutex`, `RefCell`, `dyn` or statics holding app state. What
+  blocks (the disk, niri) has one owner that takes commands and sends
+  replies, so there are no locks and every transition is tested as a
+  function.
 - Keep the workspace lint set (`[workspace.lints.clippy]`): it encodes real
   review findings.
+- The ast-grep rules in `lint/` (`ast-grep scan`, `ast-grep test`) refuse
+  what clippy cannot see: a `Box` (hold the value, borrow it, or make the
+  code generic), state shared through a lock, cell, reference count or
+  static (give it one owner and send it messages), `_ = x;` (handle it or
+  say why it cannot matter), and `&'static str` naming a closed set (an
+  enum; text people read and niri's own words are `Words`).
+- [corrode's defensive programming](https://corrode.dev/blog/defensive-programming/)
+  applies: slice patterns before indexing, no catch-all arms, `TryFrom` for
+  conversions that can fail, enums for flags. For actors,
+  [barafael's posts](https://barafael.github.io/): one owner reached by
+  messages, messages that own their data, shutdown when the channel
+  closes, tests that await the loop instead of sleeping.
+- Lints are fixed in the code, never silenced with a local `allow`. A lint
+  that is wrong for a kind of code everywhere changes level in
+  `Cargo.toml`, with the reason beside it (`large_enum_variant`: its fix is
+  a Box). Tests may index, unwrap and panic (`clippy.toml`): there a panic
+  is a failing test.
+- A failure that cannot matter is written `if x.is_err() { // why }`, never
+  `let _ =`; a value dropped on purpose is `drop(x)`.
 
 ## Verification
 
-- `just check` (fmt, clippy for the desktop and the wasm build, tests) and
+- `just check` (fmt, the ast-grep rules, clippy for the desktop and the wasm build, tests) and
   `just audit` (rustsec, cargo-deny). CI runs the same. `just check` lints
   the wasm build, so a new native-only call fails CI instead of the demo.
 - Clippy's nursery lints are unfinished and often noisy: `just lint-nursery`
@@ -86,7 +115,8 @@ Reminders).
   2026-10-10).
 - Keep justfile recipes plain sequential commands: no shell plumbing
   (xargs, pipes, settings overrides) and no tools beyond cargo, its
-  subcommands and wasm-pack.
+  subcommands, wasm-pack and ast-grep. CI's test image installs ast-grep
+  from the same dated Arch snapshot as niri.
 - Workflows: CI runs zizmor (its action, pinned, read-only, `auditor`
   persona); locally, `zizmor .github/workflows/` before changing a
   workflow. Actions are pinned to commits, jobs get only the permissions
@@ -98,7 +128,8 @@ Reminders).
   kept as `CI_IMAGE_TAG` in `.github/workflows/ci.yml`; after changing
   either file, update it, or the image job fails and says the new one. To
   move to newer niri and Arch packages, move both dates in the
-  Containerfile together.
+  Containerfile together. Tests that ask niri skip where it is not
+  installed, except with `CI` set: there a missing niri fails the suite.
 - UI tests are headless (`iced_test`, `niri-center-ui/src/ui_tests.rs`):
   they drive the real `view`/`update` and assert behaviour or computed
   properties (contrast). Screens rendered by `just ui-shots` are for human

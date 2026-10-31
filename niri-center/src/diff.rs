@@ -64,173 +64,418 @@ pub struct FileDiff {
 
 /// Diff `old` vs `new` line-wise; empty vec when identical.
 pub fn diff(old: &str, new: &str) -> Vec<Hunk> {
-    let a: Vec<&str> = old.lines().collect();
-    let b: Vec<&str> = new.lines().collect();
-    let ops = lcs_ops(&a, &b);
-
     const CONTEXT: usize = 3;
-    let is_keep = |index: usize| matches!(ops[index], Op::Keep(..));
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut ops = lcs_ops(&old_lines, &new_lines, |old, new| old == new);
+    whole_blocks(&mut ops);
+
+    // each change, by its place in the script, with the kept lines between
+    // changes that lie close together: their contexts would overlap, so
+    // they share a hunk
+    let changed: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !op.is_keep())
+        .map(|(place, _)| place)
+        .collect();
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    for place in changed {
+        match groups.last_mut() {
+            Some((_, last)) if place - *last <= 2 * CONTEXT + 1 => *last = place,
+            Some(_) | None => groups.push((place, place)),
+        }
+    }
     let mut hunks = Vec::new();
-    let mut pos = 0;
     // line numbers before op `counted`, carried along instead of recounted
     let (mut counted, mut old_line, mut new_line) = (0, 1, 1);
-
-    while pos < ops.len() {
-        if is_keep(pos) {
-            pos += 1;
-            continue;
-        }
-        // the changes from here on that lie close together: one hunk, as
-        // their contexts would otherwise overlap
-        let block_start = pos;
-        let mut end = pos;
-        loop {
-            while end < ops.len() && !is_keep(end) {
-                end += 1;
-            }
-            let mut next = end;
-            while next < ops.len() && is_keep(next) {
-                next += 1;
-            }
-            if next < ops.len() && next - end <= 2 * CONTEXT {
-                end = next;
-            } else {
-                break;
-            }
-        }
-        let hunk_end = (end + CONTEXT).min(ops.len());
-        let start = block_start.saturating_sub(CONTEXT);
-        for op in &ops[counted..start] {
+    for (first, last) in groups {
+        let start = first.saturating_sub(CONTEXT);
+        let end = (last + 1 + CONTEXT).min(ops.len());
+        for op in ops.get(counted..start).unwrap_or_default() {
             old_line += usize::from(!matches!(op, Op::Ins(_)));
             new_line += usize::from(!matches!(op, Op::Del(_)));
         }
         counted = start;
-        let (old_start, new_start) = (old_line, new_line);
-
-        let mut lines = Vec::new();
-        for op in &ops[start..hunk_end] {
-            match op {
-                Op::Keep(ol, _nl) => lines.push(Line::Context(a[*ol].to_string())),
-                Op::Del(ol) => lines.push(Line::Removed(a[*ol].to_string())),
-                Op::Ins(nl) => lines.push(Line::Added(b[*nl].to_string())),
-            }
-        }
+        let lines = ops
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .map(|op| match op {
+                Op::Keep(old, _) => Line::Context((*old).to_string()),
+                Op::Del(old) => Line::Removed((*old).to_string()),
+                Op::Ins(new) => Line::Added((*new).to_string()),
+            })
+            .collect();
         hunks.push(Hunk {
-            old_start,
-            new_start,
+            old_start: old_line,
+            new_start: new_line,
             lines,
         });
-        pos = hunk_end;
     }
     hunks
 }
 
-/// One step of an edit script from `a` to `b`, by index.
-pub(crate) enum Op {
-    /// The same item in both: its index in `a`, then in `b`.
-    Keep(usize, usize),
+/// Which side of the diff a run of changed lines is on.
+#[derive(Clone, Copy)]
+enum Side {
+    Old,
+    New,
+}
+
+impl Side {
+    /// The item `op` stands for on this side, when it has one there.
+    fn item<'item, T>(self, op: &Op<'item, T, T>) -> Option<&'item T> {
+        match (self, *op) {
+            (Self::Old, Op::Keep(item, _) | Op::Del(item))
+            | (Self::New, Op::Keep(_, item) | Op::Ins(item)) => Some(item),
+            (Self::Old, Op::Ins(_)) | (Self::New, Op::Del(_)) => None,
+        }
+    }
+
+    /// Whether `op` is a line only this side has.
+    const fn changed<A, B>(self, op: &Op<'_, A, B>) -> bool {
+        matches!(
+            (self, op),
+            (Self::Old, Op::Del(_)) | (Self::New, Op::Ins(_))
+        )
+    }
+}
+
+/// Whether added or removed lines open every block they close, as a KDL
+/// block written or taken out whole does: `}` first and `x {` last is the
+/// same text read one line off.
+fn whole<'view>(lines: impl Iterator<Item = &'view str>) -> bool {
+    let mut depth = 0_i32;
+    for line in lines.map(str::trim) {
+        if line.starts_with('}') {
+            depth -= 1;
+            if depth < 0 {
+                return false;
+            }
+        }
+        if line.ends_with('{') {
+            depth += 1;
+        }
+    }
+    depth == 0
+}
+
+/// A line both sides keep can often be matched to an equal line further
+/// along a run of added or removed lines instead. Match it there when the
+/// runs then hold whole blocks: `+ }  + env {  + y` before a kept `}`
+/// reads as `+ env {  + y  + }` after it. The edit script stays as short.
+fn whole_blocks<'item, 'line>(ops: &mut [Op<'item, &'line str, &'line str>]) {
+    for side in [Side::Old, Side::New] {
+        // a line only the other side has reads as nothing here
+        let text = |op: &Op<'item, &'line str, &'line str>| -> &'line str {
+            side.item(op).copied().unwrap_or_default()
+        };
+        let run = |ops: &[Op<'item, &'line str, &'line str>], from: usize, to: usize| {
+            whole(ops.get(from..to).unwrap_or_default().iter().map(text))
+        };
+        for kept in 0..ops.len() {
+            let Some(&Op::Keep(old, new)) = ops.get(kept) else {
+                continue;
+            };
+            let line = text(&Op::Keep(old, new));
+            let changed_before = ops
+                .get(..kept)
+                .unwrap_or_default()
+                .iter()
+                .rev()
+                .take_while(|op| !op.is_keep())
+                .count();
+            let changed_after = ops
+                .get(kept + 1..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|op| !op.is_keep())
+                .count();
+            let (start, end) = (kept - changed_before, kept + 1 + changed_after);
+            // the run before the kept line, then the one after it
+            for (from, to) in [(start, kept), (kept + 1, end)] {
+                if run(ops, from, to) {
+                    continue;
+                }
+                let (low, high) = (from.min(kept), to.max(kept + 1));
+                let Some(other) = (from..to).find(|&other| {
+                    ops.get(other)
+                        .is_some_and(|op| side.changed(op) && text(op) == line)
+                        && run(ops, low, other)
+                        && run(ops, other + 1, high)
+                }) else {
+                    continue;
+                };
+                let Some(moved) = ops.get(other).and_then(|op| side.item(op)) else {
+                    continue;
+                };
+                let (keep, let_go) = match side {
+                    Side::Old => (Op::Keep(moved, new), Op::Del(old)),
+                    Side::New => (Op::Keep(old, moved), Op::Ins(new)),
+                };
+                // the other side's lines between the two places stay on the
+                // same side of the kept line as before
+                let between = |from: usize, to: usize, this: bool| {
+                    ops.get(from..to)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(move |op| side.changed(op) == this)
+                        .copied()
+                        .collect::<Vec<_>>()
+                };
+                let region: Vec<Op<'item, &'line str, &'line str>> = if other < kept {
+                    let mut region = ops.get(low..other).unwrap_or_default().to_vec();
+                    region.extend(between(other + 1, kept, false));
+                    region.push(keep);
+                    region.extend(between(other + 1, kept, true));
+                    region.push(let_go);
+                    region
+                } else {
+                    let mut region = vec![let_go];
+                    region.extend(between(kept + 1, other, true));
+                    region.push(keep);
+                    region.extend(between(kept + 1, other, false));
+                    region.extend_from_slice(ops.get(other + 1..high).unwrap_or_default());
+                    region
+                };
+                if let Some(slots) = ops.get_mut(low..high) {
+                    slots.copy_from_slice(&region);
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// One step of an edit script from `a` to `b`.
+#[derive(Debug)]
+pub(crate) enum Op<'item, A, B> {
+    /// The same item in both: as `a` has it, then as `b` has it.
+    Keep(&'item A, &'item B),
     /// An item only `a` has.
-    Del(usize),
+    Del(&'item A),
     /// An item only `b` has.
-    Ins(usize),
+    Ins(&'item B),
+}
+
+// derived Clone and Copy would ask the same of A and B; references copy
+impl<A, B> Clone for Op<'_, A, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A, B> Copy for Op<'_, A, B> {}
+
+impl<A, B> Op<'_, A, B> {
+    pub(crate) const fn is_keep(&self) -> bool {
+        matches!(self, Self::Keep(..))
+    }
 }
 
 /// The edit script from `a` to `b` by their longest common subsequence
-/// (standard DP), for lines and for any other items. What both start and
-/// end with is kept outright first: a change is mostly one block in a long
-/// file, and the table then covers only it.
-pub(crate) fn lcs_ops<T: PartialEq>(a: &[T], b: &[T]) -> Vec<Op> {
-    let prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
-    let suffix = a[prefix..]
+/// (standard DP), items matched by `same`. What both start and end with is
+/// kept outright first: a change is mostly one block in a long file, and
+/// the table then covers only it.
+pub(crate) fn lcs_ops<'item, A, B>(
+    a: &'item [A],
+    b: &'item [B],
+    same: impl Fn(&A, &B) -> bool,
+) -> Vec<Op<'item, A, B>> {
+    let prefix = a
+        .iter()
+        .zip(b)
+        .take_while(|(old, new)| same(old, new))
+        .count();
+    let (a_rest, b_rest) = (
+        a.get(prefix..).unwrap_or_default(),
+        b.get(prefix..).unwrap_or_default(),
+    );
+    let suffix = a_rest
         .iter()
         .rev()
-        .zip(b[prefix..].iter().rev())
-        .take_while(|(x, y)| x == y)
+        .zip(b_rest.iter().rev())
+        .take_while(|(old, new)| same(old, new))
         .count();
-    let (a_mid, b_mid) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
-    let mut ops: Vec<Op> = (0..prefix).map(|i| Op::Keep(i, i)).collect();
-    ops.extend(lcs_core(a_mid, b_mid).into_iter().map(|op| match op {
-        Op::Keep(i, j) => Op::Keep(i + prefix, j + prefix),
-        Op::Del(i) => Op::Del(i + prefix),
-        Op::Ins(j) => Op::Ins(j + prefix),
-    }));
-    let (a_end, b_end) = (a.len() - suffix, b.len() - suffix);
-    ops.extend((0..suffix).map(|k| Op::Keep(a_end + k, b_end + k)));
+    let (a_middle, a_end) = a_rest.split_at(a_rest.len() - suffix);
+    let (b_middle, b_end) = b_rest.split_at(b_rest.len() - suffix);
+    let mut ops: Vec<Op<'item, A, B>> = a
+        .iter()
+        .zip(b)
+        .take(prefix)
+        .map(|(old, new)| Op::Keep(old, new))
+        .collect();
+    ops.extend(lcs_core(a_middle, b_middle, &same));
+    ops.extend(a_end.iter().zip(b_end).map(|(old, new)| Op::Keep(old, new)));
     ops
 }
 
-fn lcs_core<T: PartialEq>(a: &[T], b: &[T]) -> Vec<Op> {
-    let n = a.len();
-    let m = b.len();
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if a[i] == b[j] {
-                dp[i + 1][j + 1] + 1
+/// The lengths of the longest common subsequences of every pair of
+/// suffixes, in one table a row per item of `a` and one more: a suffix past
+/// the end is empty and shares nothing.
+struct Table {
+    width: usize,
+    cells: Vec<usize>,
+}
+
+impl Table {
+    fn at(&self, a_from: usize, b_from: usize) -> usize {
+        self.cells
+            .get(a_from * self.width + b_from)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn set(&mut self, a_from: usize, b_from: usize, length: usize) {
+        if let Some(cell) = self.cells.get_mut(a_from * self.width + b_from) {
+            *cell = length;
+        }
+    }
+}
+
+fn lcs_core<'item, A, B>(
+    a: &'item [A],
+    b: &'item [B],
+    same: impl Fn(&A, &B) -> bool,
+) -> Vec<Op<'item, A, B>> {
+    // filled from the ends: each cell from the ones after it
+    let width = b.len() + 1;
+    let mut table = Table {
+        width,
+        cells: vec![0; (a.len() + 1) * width],
+    };
+    for (a_from, old) in a.iter().enumerate().rev() {
+        for (b_from, new) in b.iter().enumerate().rev() {
+            let length = if same(old, new) {
+                table.at(a_from + 1, b_from + 1) + 1
             } else {
-                dp[i + 1][j].max(dp[i][j + 1])
+                table
+                    .at(a_from + 1, b_from)
+                    .max(table.at(a_from, b_from + 1))
             };
+            table.set(a_from, b_from, length);
         }
     }
 
-    let mut ops = Vec::with_capacity(n + m);
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if a[i] == b[j] {
-            ops.push(Op::Keep(i, j));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            ops.push(Op::Del(i));
-            i += 1;
+    let mut ops = Vec::with_capacity(a.len() + b.len());
+    let (mut a_from, mut b_from) = (0, 0);
+    while let (Some(old), Some(new)) = (a.get(a_from), b.get(b_from)) {
+        if same(old, new) {
+            ops.push(Op::Keep(old, new));
+            a_from += 1;
+            b_from += 1;
+        } else if table.at(a_from + 1, b_from) >= table.at(a_from, b_from + 1) {
+            ops.push(Op::Del(old));
+            a_from += 1;
         } else {
-            ops.push(Op::Ins(j));
-            j += 1;
+            ops.push(Op::Ins(new));
+            b_from += 1;
         }
     }
-    while i < n {
-        ops.push(Op::Del(i));
-        i += 1;
-    }
-    while j < m {
-        ops.push(Op::Ins(j));
-        j += 1;
-    }
+    ops.extend(a.get(a_from..).unwrap_or_default().iter().map(Op::Del));
+    ops.extend(b.get(b_from..).unwrap_or_default().iter().map(Op::Ins));
     ops
 }
 
-/// Unified-diff rendering, mostly for tests and future `--export`.
+/// Unified-diff rendering, as `patch` and `git apply` read it.
 pub fn render_unified(file: &FileDiff) -> String {
-    let mut s = format!("--- {}\n+++ {}\n", file.path, file.path);
-    for h in &file.hunks {
-        // each side counts its context lines too, as `patch` reads them
-        let (old, new) = h.numbered().fold((0, 0), |(old, new), (o, n, _)| {
-            (
-                old + usize::from(o.is_some()),
-                new + usize::from(n.is_some()),
-            )
-        });
-        let range = |start: usize, count: usize| match count {
-            // an empty side names the line before it
-            0 => format!("{},0", start.saturating_sub(1)),
-            1 => start.to_string(),
-            _ => format!("{start},{count}"),
-        };
-        s.push_str(&format!(
-            "@@ -{} +{} @@\n",
-            range(h.old_start, old),
-            range(h.new_start, new)
-        ));
-        for line in &h.lines {
-            s.push_str(&format!("{}{}\n", line.prefix(), line.text()));
+    file.to_string()
+}
+
+impl std::fmt::Display for FileDiff {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(out, "--- {}", self.path)?;
+        writeln!(out, "+++ {}", self.path)?;
+        for hunk in &self.hunks {
+            // each side counts its context lines too, as `patch` reads them
+            let (old, new) = hunk.numbered().fold((0, 0), |(old, new), (o, n, _)| {
+                (
+                    old + usize::from(o.is_some()),
+                    new + usize::from(n.is_some()),
+                )
+            });
+            let range = |start: usize, count: usize| match count {
+                // an empty side names the line before it
+                0 => format!("{},0", start.saturating_sub(1)),
+                1 => start.to_string(),
+                _ => format!("{start},{count}"),
+            };
+            writeln!(
+                out,
+                "@@ -{} +{} @@",
+                range(hunk.old_start, old),
+                range(hunk.new_start, new)
+            )?;
+            for line in &hunk.lines {
+                writeln!(out, "{}{}", line.prefix(), line.text())?;
+            }
         }
+        Ok(())
     }
-    s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lines `hunks` mark as `kind`, by text.
+    fn marked(hunks: &[Hunk], kind: fn(&Line) -> bool) -> Vec<String> {
+        hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| kind(line))
+            .map(|line| line.text().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_added_block_reads_as_a_whole_block() {
+        // a change before it stops the shared start short, and the shared
+        // end then claims the block's closing brace
+        let old = "A\n}\nZ\n";
+        let new = "B\n}\nenv {\n    y\n}\nZ\n";
+        let block = ["B", "env {", "    y", "}"];
+        let added = marked(&diff(old, new), |line| matches!(line, Line::Added(_)));
+        assert_eq!(added, block);
+        // and the same taken out again
+        let removed = marked(&diff(new, old), |line| matches!(line, Line::Removed(_)));
+        assert_eq!(removed, block);
+    }
+
+    proptest::proptest! {
+        /// Matching kept lines elsewhere still spells out both texts, line
+        /// for line, and keeps as many lines.
+        #[test]
+        fn whole_blocks_keeps_a_valid_script(
+            a in proptest::collection::vec(0..5_usize, 0..10),
+            b in proptest::collection::vec(0..5_usize, 0..10),
+        ) {
+            const LINES: [&str; 5] = ["a {", "}", "x", "", "    y"];
+            let old_lines: Vec<&str> = a.into_iter().map(|line| LINES[line]).collect();
+            let new_lines: Vec<&str> = b.into_iter().map(|line| LINES[line]).collect();
+            let mut ops = lcs_ops(&old_lines, &new_lines, |old, new| old == new);
+            let kept = |ops: &[Op<'_, &str, &str>]| ops.iter().filter(|op| op.is_keep()).count();
+            let before = kept(&ops);
+            whole_blocks(&mut ops);
+            proptest::prop_assert_eq!(kept(&ops), before);
+            // read back, each side spells out its own text in order
+            let (mut old_read, mut new_read) = (Vec::new(), Vec::new());
+            for op in &ops {
+                match *op {
+                    Op::Keep(old, new) => {
+                        proptest::prop_assert_eq!(old, new);
+                        old_read.push(*old);
+                        new_read.push(*new);
+                    }
+                    Op::Del(old) => old_read.push(*old),
+                    Op::Ins(new) => new_read.push(*new),
+                }
+            }
+            proptest::prop_assert_eq!(old_read, old_lines);
+            proptest::prop_assert_eq!(new_read, new_lines);
+        }
+    }
 
     #[test]
     fn identical_inputs_no_hunks() {
@@ -256,8 +501,8 @@ mod tests {
         let hunks = diff("a\nb\nc\n", "a\nx\nb\nc\nd\n");
         let no_removals = hunks
             .iter()
-            .flat_map(|h| &h.lines)
-            .filter_map(|l| match l {
+            .flat_map(|hunk| &hunk.lines)
+            .filter_map(|line| match line {
                 Line::Removed(t) => Some(t.as_str()),
                 Line::Context(_) | Line::Added(_) => None,
             })
@@ -266,8 +511,8 @@ mod tests {
         assert!(no_removals, "no pure removals expected");
         let added: Vec<_> = hunks
             .iter()
-            .flat_map(|h| &h.lines)
-            .filter_map(|l| match l {
+            .flat_map(|hunk| &hunk.lines)
+            .filter_map(|line| match line {
                 Line::Added(t) => Some(t.as_str()),
                 Line::Context(_) | Line::Removed(_) => None,
             })
@@ -285,7 +530,7 @@ mod tests {
         let context: Vec<&str> = hunks[0]
             .lines
             .iter()
-            .filter(|l| matches!(l, Line::Context(_)))
+            .filter(|line| matches!(line, Line::Context(_)))
             .map(Line::text)
             .collect();
         assert_eq!(context, ["1", "2", "4", "5", "6", "8", "9", "10"]);
@@ -297,11 +542,11 @@ mod tests {
 
     #[test]
     fn a_hunk_header_counts_its_context_lines() {
-        let f = FileDiff {
+        let file_diff = FileDiff {
             path: "config.kdl".into(),
             hunks: diff("a\nb\nc\n", "a\nB\nc\nd\n"),
         };
-        let out = render_unified(&f);
+        let out = render_unified(&file_diff);
         assert!(out.contains("@@ -1,3 +1,4 @@"), "{out}");
         let added_to_empty = FileDiff {
             path: "new.kdl".into(),
@@ -339,11 +584,11 @@ mod tests {
 
     #[test]
     fn unified_render_has_markers() {
-        let f = FileDiff {
+        let file_diff = FileDiff {
             path: "keybinds.kdl".into(),
             hunks: diff("a\nb\nc\n", "a\nB\nc\n"),
         };
-        let out = render_unified(&f);
+        let out = render_unified(&file_diff);
         assert!(out.contains("--- keybinds.kdl"));
         assert!(out.contains("@@ -"));
         assert!(out.contains("-b"));

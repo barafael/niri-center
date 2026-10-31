@@ -8,9 +8,10 @@
 
 use iced::widget::{
     Row, button, canvas, checkbox, column, combo_box, container, pick_list, row, slider, space,
-    text, text_input, toggler,
+    text, text_input,
 };
 use iced::{Alignment, Color, Font, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use num_traits::ToPrimitive;
 
 use niri_center::color::{Gradient, GradientEnd};
 use niri_center::settings::DraftKey;
@@ -31,6 +32,43 @@ use crate::{El, color, theme};
 /// Stand-in for a value a picker or file dialog fills in later.
 pub const HOLE: char = '\u{0}';
 
+/// Where a picked color or a chosen path goes: a field, by its draft key,
+/// and the text it will hold, with [`HOLE`] where the value goes. Without
+/// a hole the value is the whole text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    Field(DraftKey, String),
+    /// The command of the autostart entry being added.
+    StartupCommand(String),
+}
+
+impl Destination {
+    /// The message that puts `value` there.
+    pub fn filled(&self, value: &str) -> Message {
+        let fill = |text: &str| {
+            if text.contains(HOLE) {
+                text.replace(HOLE, value)
+            } else {
+                value.to_string()
+            }
+        };
+        match self {
+            Self::Field(DraftKey::Setting(id), text) => {
+                Message::Setting(*id, Edit::Draft(fill(text)))
+            }
+            Self::Field(DraftKey::Output(output, child), text) => {
+                Message::Output(output.clone(), *child, Edit::Draft(fill(text)))
+            }
+            Self::Field(DraftKey::Position(output, coordinate), text) => Message::Displays(
+                crate::pages::displays::Message::Position(output.clone(), *coordinate, fill(text)),
+            ),
+            Self::StartupCommand(text) => {
+                Message::Startup(crate::pages::startup::Message::New(fill(text)))
+            }
+        }
+    }
+}
+
 /// A pick-list entry: what gets written (`None` = niri's default) and what
 /// the user reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +78,8 @@ pub struct Labeled<T = String> {
 }
 
 impl<T> std::fmt::Display for Labeled<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(&self.label)
     }
 }
 
@@ -61,16 +99,22 @@ pub fn is_wide(state: &App, key: &DraftKey, kind: Kind) -> bool {
         .is_some_and(|open| open.field.key == *key)
 }
 
+/// Whether a control of `kind` stays beside its label in a narrow row: a
+/// switch does, as in GNOME and KDE.
+pub const fn fits_beside(kind: Kind) -> bool {
+    matches!(kind, Kind::Switch | Kind::Enabled)
+}
+
 /// The control for a value of `kind` whose current reading is `reading`;
 /// `make` turns an edit into the message to send.
-pub fn control<'a>(
-    state: &'a App,
+pub fn control<'app>(
+    state: &'app App,
     key: &DraftKey,
     kind: Kind,
-    default: &'static str,
+    default: &'app str,
     reading: Reading,
     make: impl Fn(Edit) -> Message + Clone + 'static,
-) -> El<'a> {
+) -> El<'app> {
     let drafted = |current: Option<String>| {
         state
             .session
@@ -81,10 +125,11 @@ pub fn control<'a>(
             .unwrap_or_default()
     };
     match (kind, reading) {
-        (Kind::Switch | Kind::Enabled, Reading::Switch(on)) => toggler(on)
-            .on_toggle(move |on| make(Edit::Switch(on)))
-            .size(20)
-            .into(),
+        (Kind::Switch | Kind::Enabled, Reading::Switch(on)) => {
+            crate::motion::switch(on, state.motions.switch)
+                .on_toggle(move |on| make(Edit::Switch(on)))
+                .into()
+        }
         (Kind::OnOff, Reading::OnOff(current)) => on_off_list(current, default, make),
         (Kind::Choice(options), Reading::Value(current)) => {
             let labeled: Vec<(String, String)> = options
@@ -92,24 +137,34 @@ pub fn control<'a>(
                 .map(|(value, label)| ((*value).to_string(), (*label).to_string()))
                 .collect();
             let shown_default = kind.word(default).unwrap_or(default);
-            choice_list(labeled, current, &default_label(shown_default), make)
+            choice_list(
+                labeled,
+                current.as_deref(),
+                &default_label(shown_default),
+                make,
+            )
         }
         (Kind::Bool, Reading::Value(current)) => choice_list(
             vec![
                 ("true".to_string(), "On".to_string()),
                 ("false".to_string(), "Off".to_string()),
             ],
-            current,
+            current.as_deref(),
             &default_label(kind.word(default).unwrap_or(default)),
             make,
         ),
         (Kind::Color, Reading::Value(current)) => {
-            color_field(state, key, drafted(current), default, make)
+            color_field(state, key, &drafted(current), default, make)
         }
         (Kind::Gradient, Reading::Value(current)) => gradient_field(
             state,
             key,
-            state.session.drafts.typed(key).cloned().or(current),
+            state
+                .session
+                .drafts
+                .typed(key)
+                .map(String::as_str)
+                .or(current.as_deref()),
             default,
             make,
         ),
@@ -117,10 +172,12 @@ pub fn control<'a>(
             size_list(state, key, axis, current, default, make)
         }
         (Kind::Sizes { many: false, .. }, Reading::Value(current)) => {
-            default_size(state, current, default, make)
+            default_size(state, current.as_deref(), default, make)
         }
-        (Kind::Layouts, Reading::Value(current)) => layouts_field(state, drafted(current), make),
-        (Kind::XkbOptions, Reading::Value(current)) => options_field(state, drafted(current), make),
+        (Kind::Layouts, Reading::Value(current)) => layouts_field(state, &drafted(current), make),
+        (Kind::XkbOptions, Reading::Value(current)) => {
+            options_field(state, &drafted(current), make)
+        }
         (Kind::CursorTheme, Reading::Value(current)) => {
             let themes = state
                 .system
@@ -128,7 +185,7 @@ pub fn control<'a>(
                 .iter()
                 .map(|theme_name| (theme_name.clone(), theme_name.clone()))
                 .collect();
-            choice_list(themes, current, &default_label(default), make)
+            choice_list(themes, current.as_deref(), &default_label(default), make)
         }
         (Kind::Output, Reading::Value(current)) => {
             let outputs = state
@@ -143,20 +200,20 @@ pub fn control<'a>(
                     (output.name.clone(), label)
                 })
                 .collect();
-            choice_list(outputs, current, &default_label(default), make)
+            choice_list(outputs, current.as_deref(), &default_label(default), make)
         }
         (Kind::File { example }, Reading::Value(current)) => {
-            file_field(drafted(current), example, default, make)
+            file_field(key, &drafted(current), example.as_str(), default, make)
         }
         (Kind::Screenshot, Reading::Value(current)) => {
-            screenshot_field(drafted(current), default, make)
+            screenshot_field(state, key, &drafted(current), default, make)
         }
         (Kind::Float { min, max }, Reading::Value(current)) if max - min <= 2.0 => {
-            slider_field(drafted(current), min, max, default, make)
+            slider_field(&drafted(current), min, max, default, make)
         }
         (_, Reading::Value(current)) => {
             let example = if let Kind::Text { example } | Kind::Prop { example, .. } = kind {
-                example
+                example.as_str()
             } else {
                 ""
             };
@@ -177,12 +234,16 @@ pub fn control<'a>(
     }
 }
 
-fn on_off_list<'a>(current: OnOff, default: &str, make: impl Fn(Edit) -> Message + 'a) -> El<'a> {
+fn on_off_list<'view>(
+    current: OnOff,
+    default: &str,
+    make: impl Fn(Edit) -> Message + 'view,
+) -> El<'view> {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Item(OnOff, String);
     impl std::fmt::Display for Item {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(&self.1)
+        fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            out.write_str(&self.1)
         }
     }
     let items = vec![
@@ -206,12 +267,12 @@ fn on_off_list<'a>(current: OnOff, default: &str, make: impl Fn(Edit) -> Message
 /// A pick list of `(value, label)` options with niri's default first (it
 /// removes the setting). A current value missing from the options is kept,
 /// so the list never hides what the config says.
-pub fn choice_list<'a>(
+pub fn choice_list<'view>(
     options: Vec<(String, String)>,
-    current: Option<String>,
+    current: Option<&str>,
     default: &str,
-    make: impl Fn(Edit) -> Message + 'a,
-) -> El<'a> {
+    make: impl Fn(Edit) -> Message + 'view,
+) -> El<'view> {
     let mut items = vec![Labeled {
         value: None,
         label: default.to_string(),
@@ -220,28 +281,33 @@ pub fn choice_list<'a>(
         value: Some(value),
         label,
     }));
-    if let Some(value) = &current
-        && !items.iter().any(|item| item.value.as_ref() == Some(value))
+    if let Some(value) = current
+        && !items
+            .iter()
+            .any(|item| item.value.as_deref() == Some(value))
     {
         items.push(Labeled {
-            value: Some(value.clone()),
-            label: value.clone(),
+            value: Some(value.to_string()),
+            label: value.to_string(),
         });
     }
-    let selected = items.iter().find(|item| item.value == current).cloned();
+    let selected = items
+        .iter()
+        .find(|item| item.value.as_deref() == current)
+        .cloned();
     pick_list(items, selected, move |item| make(Edit::Choice(item.value)))
         .width(Length::Fill)
         .into()
 }
 
 /// A number with a slider for settings with a short range.
-fn slider_field<'a>(
-    value: String,
+fn slider_field<'view>(
+    value: &str,
     min: f64,
     max: f64,
     default: &str,
-    make: impl Fn(Edit) -> Message + Clone + 'a,
-) -> El<'a> {
+    make: impl Fn(Edit) -> Message + Clone + 'view,
+) -> El<'view> {
     let position = value
         .parse::<f64>()
         .ok()
@@ -250,8 +316,8 @@ fn slider_field<'a>(
         .clamp(min, max);
     let on_slide = make.clone();
     row![
-        slider(min..=max, position, move |v| on_slide(Edit::Draft(
-            short_number(v)
+        slider(min..=max, position, move |value| on_slide(Edit::Draft(
+            short_number(value)
         )))
         .step(0.01),
         text_input(
@@ -260,7 +326,7 @@ fn slider_field<'a>(
             } else {
                 default
             },
-            &value
+            value
         )
         .on_input(move |input| make(Edit::Draft(input)))
         .width(72),
@@ -271,14 +337,14 @@ fn slider_field<'a>(
 }
 
 /// A square of `color` with a hairline edge.
-fn swatch<'a>(color: Option<Color>, size: f32) -> El<'a> {
+fn swatch<'view>(color: Option<Color>, size: f32) -> El<'view> {
     container(space().width(size).height(size))
         .style(move |theme: &Theme| {
-            let c = theme::colors(theme);
+            let colors = theme::colors(theme);
             container::Style {
                 background: color.map(iced::Background::Color),
                 border: iced::Border {
-                    color: c.line,
+                    color: colors.line,
                     width: 1.0,
                     radius: 4.0.into(),
                 },
@@ -288,24 +354,28 @@ fn swatch<'a>(color: Option<Color>, size: f32) -> El<'a> {
         .into()
 }
 
-/// A swatch that opens the picker for `key`; `target` is the message the
-/// picked color goes into (its draft holds [`HOLE`] where the color goes).
-fn swatch_button<'a>(color: Option<Color>, field: ColorField, target: Message) -> El<'a> {
+/// A swatch that opens the picker for `field`, the picked color going to
+/// `destination`.
+fn swatch_button<'view>(
+    color: Option<Color>,
+    field: ColorField,
+    destination: Destination,
+) -> El<'view> {
     button(swatch(color, 22.0))
         .padding(0)
         .style(button::text)
-        .on_press(Message::OpenColor(field, color, Box::new(target)))
+        .on_press(Message::OpenColor(field, color, destination))
         .into()
 }
 
-fn color_field<'a>(
-    state: &'a App,
+fn color_field<'app>(
+    state: &'app App,
     key: &DraftKey,
-    value: String,
-    default: &'static str,
-    make: impl Fn(Edit) -> Message + Clone + 'a,
-) -> El<'a> {
-    let shown = color::parse(&value).or_else(|| {
+    value: &str,
+    default: &'app str,
+    make: impl Fn(Edit) -> Message + Clone + 'app,
+) -> El<'app> {
+    let shown = color::parse(value).or_else(|| {
         value
             .trim()
             .is_empty()
@@ -317,7 +387,7 @@ fn color_field<'a>(
     } else {
         default_placeholder(default)
     };
-    let target = make(Edit::Draft(HOLE.to_string()));
+    let target = Destination::Field(key.clone(), HOLE.to_string());
     let line = row![
         swatch_button(
             shown,
@@ -327,7 +397,7 @@ fn color_field<'a>(
             },
             target,
         ),
-        text_input(&placeholder, &value)
+        text_input(&placeholder, value)
             .on_input({
                 let make = make.clone();
                 move |input| make(Edit::Draft(input))
@@ -348,7 +418,10 @@ fn color_field<'a>(
 
 /// The picker under an open color field: the canvas, a few colors to start
 /// from, picking from the screen through niri, and Done.
-fn picker_panel<'a>(hsva: color::Hsva, make: impl Fn(Edit) -> Message + Clone + 'a) -> El<'a> {
+fn picker_panel<'view>(
+    hsva: color::Hsva,
+    make: impl Fn(Edit) -> Message + Clone + 'view,
+) -> El<'view> {
     let mut swatches = Row::new().spacing(6).align_y(Alignment::Center);
     for hex in color::SWATCHES {
         let make = make.clone();
@@ -390,7 +463,7 @@ fn picker_panel<'a>(hsva: color::Hsva, make: impl Fn(Edit) -> Message + Clone + 
 }
 
 /// What niri says about a config it cannot read, as it says it.
-pub fn diagnostics<'a>(words: &str) -> El<'a> {
+pub fn diagnostics<'view>(words: &str) -> El<'view> {
     container(
         text(words.trim_end().to_string())
             .size(12)
@@ -402,14 +475,14 @@ pub fn diagnostics<'a>(words: &str) -> El<'a> {
     .into()
 }
 
-fn gradient_field<'a>(
-    state: &'a App,
+fn gradient_field<'app>(
+    state: &'app App,
     key: &DraftKey,
-    current: Option<String>,
-    default: &'static str,
-    make: impl Fn(Edit) -> Message + Clone + 'a,
-) -> El<'a> {
-    let Some(gradient) = current.as_deref().and_then(Gradient::parse) else {
+    current: Option<&str>,
+    default: &'app str,
+    make: impl Fn(Edit) -> Message + Clone + 'app,
+) -> El<'app> {
+    let Some(gradient) = current.and_then(Gradient::parse) else {
         return button(text("Add a gradient").size(12))
             .padding([3, 10])
             .style(theme::secondary)
@@ -433,7 +506,7 @@ fn gradient_field<'a>(
             swatch_button(
                 color::parse(value),
                 field.clone(),
-                make(Edit::Draft(hole.text()))
+                Destination::Field(key.clone(), hole.text())
             ),
             text_input("#7fc8ff", value)
                 .on_input(typed)
@@ -514,28 +587,32 @@ fn screen(state: &App) -> Size {
         .monitors
         .first()
         .map_or(Size::new(1920.0, 1200.0), |(_, m)| {
-            Size::new(m.width as f32, m.height as f32)
+            // screen sizes are far inside f32's range
+            Size::new(
+                m.width.to_f32().unwrap_or(1920.0),
+                m.height.to_f32().unwrap_or(1200.0),
+            )
         })
 }
 
 /// What part of `extent` a size takes.
 fn fraction(name: &str, value: &str, extent: f32) -> f32 {
     match (name, value.parse::<f32>()) {
-        ("proportion", Ok(p)) => p,
+        ("proportion", Ok(proportion)) => proportion,
         ("fixed", Ok(px)) => px / extent.max(1.0),
         _ => 0.0,
     }
     .clamp(0.0, 1.0)
 }
 
-fn size_list<'a>(
-    state: &'a App,
+fn size_list<'app>(
+    state: &'app App,
     key: &DraftKey,
     axis: Axis,
     current: Option<String>,
-    default: &'static str,
-    make: impl Fn(Edit) -> Message + Clone + 'a,
-) -> El<'a> {
+    default: &'app str,
+    make: impl Fn(Edit) -> Message + Clone + 'app,
+) -> El<'app> {
     let set = current.is_some();
     let text_now = state
         .session
@@ -556,7 +633,9 @@ fn size_list<'a>(
             let entries = entries.clone();
             move |entry: (String, String)| {
                 let mut next = entries.clone();
-                next[index] = entry;
+                if let Some(slot) = next.get_mut(index) {
+                    *slot = entry;
+                }
                 join_sizes(&next)
             }
         };
@@ -572,7 +651,7 @@ fn size_list<'a>(
         ];
         let selected = kinds
             .iter()
-            .find(|k| k.value.as_deref() == Some(name.as_str()))
+            .find(|known| known.value.as_deref() == Some(name.as_str()))
             .cloned();
         let switch_kind = {
             let make = make.clone();
@@ -581,7 +660,9 @@ fn size_list<'a>(
             move |picked: Labeled| {
                 let picked = picked.value.unwrap_or_default();
                 let converted = match (name.as_str(), picked.as_str(), value.parse::<f32>()) {
-                    ("proportion", "fixed", Ok(p)) => format!("{}", (p * extent).round()),
+                    ("proportion", "fixed", Ok(proportion)) => {
+                        format!("{}", (proportion * extent).round())
+                    }
                     ("fixed", "proportion", Ok(px)) => {
                         short_fraction((px / extent.max(1.0)).clamp(0.01, 1.0))
                     }
@@ -641,12 +722,12 @@ fn size_list<'a>(
     list.push(add.wrap()).into()
 }
 
-fn default_size<'a>(
-    state: &'a App,
-    current: Option<String>,
-    default: &'static str,
-    make: impl Fn(Edit) -> Message + 'a,
-) -> El<'a> {
+fn default_size<'app>(
+    state: &'app App,
+    current: Option<&str>,
+    default: &'app str,
+    make: impl Fn(Edit) -> Message + 'app,
+) -> El<'app> {
     let label_of = |text: &str| {
         let entries = sizes(text);
         entries.first().map_or_else(
@@ -666,7 +747,8 @@ fn default_size<'a>(
             sizes(
                 niri_center::settings::Setting::LayoutPresetColumnWidths
                     .spec()
-                    .default,
+                    .default
+                    .as_str(),
             )
         });
     let mut options = vec![(String::new(), "The app decides".to_string())];
@@ -683,23 +765,23 @@ fn default_size<'a>(
     if let Some(value) = &current
         && !items.iter().any(|(v, _)| v == value)
     {
-        items.push((value.clone(), label_of(value)));
+        items.push((value.to_string(), label_of(value)));
     }
     choice_list(items, current, &default_label(&label_of(default)), make)
 }
 
 /// An × that removes one entry of a list; the tooltip says which.
-pub fn remove_button<'a>(what: String, on_press: Message) -> El<'a> {
+pub fn remove_button<'view>(what: String, on_press: Message) -> El<'view> {
     icon_button(crate::icons::Icon::Remove, 12.0, what, on_press)
 }
 
 /// A bare icon that does `on_press`, named by its tooltip.
-pub fn icon_button<'a>(
+pub fn icon_button<'view>(
     icon: crate::icons::Icon,
     size: f32,
     what: String,
     on_press: Message,
-) -> El<'a> {
+) -> El<'view> {
     iced::widget::tooltip(
         button(crate::icons::icon(icon, size))
             .padding(8)
@@ -712,19 +794,19 @@ pub fn icon_button<'a>(
 }
 
 /// The words a tooltip shows, in the popup style every tooltip shares.
-pub fn tip<'a>(
-    words: impl iced::widget::text::IntoFragment<'a>,
-) -> container::Container<'a, Message> {
+pub fn tip<'view>(
+    words: impl iced::widget::text::IntoFragment<'view>,
+) -> container::Container<'view, Message> {
     container(text(words).size(12))
         .padding(6)
         .style(theme::popup)
 }
 
 /// A compact button for list rows.
-pub fn small<'a>(
-    label: impl iced::widget::text::IntoFragment<'a>,
+pub fn small<'view>(
+    label: impl iced::widget::text::IntoFragment<'view>,
     on_press: Message,
-) -> button::Button<'a, Message> {
+) -> button::Button<'view, Message> {
     button(text(label).size(12))
         .padding([3, 10])
         .style(theme::secondary)
@@ -732,7 +814,7 @@ pub fn small<'a>(
 }
 
 /// A removable entry such as a keyboard layout.
-fn chip<'a>(label: String, actions: Vec<(&'a str, Message)>) -> El<'a> {
+fn chip<'view>(label: String, actions: Vec<(&'view str, Message)>) -> El<'view> {
     let mut line = row![text(label).size(13)]
         .spacing(6)
         .align_y(Alignment::Center);
@@ -750,17 +832,17 @@ fn chip<'a>(label: String, actions: Vec<(&'a str, Message)>) -> El<'a> {
         .into()
 }
 
-fn layouts_field<'a>(
-    state: &'a App,
-    value: String,
+fn layouts_field<'app>(
+    state: &'app App,
+    value: &str,
     make: impl Fn(Edit) -> Message + Clone + 'static,
-) -> El<'a> {
+) -> El<'app> {
     if state.system.layouts.is_empty() {
-        return text_input("us,de", &value)
+        return text_input("us,de", value)
             .on_input(move |input| make(Edit::Draft(input)))
             .into();
     }
-    let codes = comma_list(&value);
+    let codes = comma_list(value);
     let mut chips = Row::new().spacing(6).align_y(Alignment::Center);
     for (index, code) in codes.iter().enumerate() {
         let name = state
@@ -795,17 +877,17 @@ fn layouts_field<'a>(
     .into()
 }
 
-fn options_field<'a>(
-    state: &'a App,
-    value: String,
+fn options_field<'app>(
+    state: &'app App,
+    value: &str,
     make: impl Fn(Edit) -> Message + Clone + 'static,
-) -> El<'a> {
+) -> El<'app> {
     if state.system.options.is_empty() {
-        return text_input("grp:win_space_toggle,ctrl:nocaps", &value)
+        return text_input("grp:win_space_toggle,ctrl:nocaps", value)
             .on_input(move |input| make(Edit::Draft(input)))
             .into();
     }
-    let codes = comma_list(&value);
+    let codes = comma_list(value);
     let mut chips = column![].spacing(6);
     for (index, code) in codes.iter().enumerate() {
         let name = state
@@ -842,23 +924,24 @@ fn options_field<'a>(
     .into()
 }
 
-fn file_field<'a>(
-    value: String,
-    example: &'static str,
-    default: &'static str,
-    make: impl Fn(Edit) -> Message + Clone + 'a,
-) -> El<'a> {
+fn file_field<'text>(
+    key: &DraftKey,
+    value: &str,
+    example: &'text str,
+    default: &'text str,
+    make: impl Fn(Edit) -> Message + Clone + 'text,
+) -> El<'text> {
     let placeholder = if default.is_empty() {
         example.to_string()
     } else {
         default_placeholder(default)
     };
     let browse = Message::Browse {
-        target: Box::new(make(Edit::Draft(HOLE.to_string()))),
+        to: Destination::Field(key.clone(), HOLE.to_string()),
         folder: false,
     };
     row![
-        text_input(&placeholder, &value)
+        text_input(&placeholder, value)
             .on_input(move |input| make(Edit::Draft(input)))
             .width(Length::Fill),
         small("Browse", browse),
@@ -868,11 +951,13 @@ fn file_field<'a>(
     .into()
 }
 
-fn screenshot_field<'a>(
-    value: String,
-    default: &'static str,
-    make: impl Fn(Edit) -> Message + Clone + 'a,
-) -> El<'a> {
+fn screenshot_field<'text>(
+    state: &App,
+    key: &DraftKey,
+    value: &str,
+    default: &'text str,
+    make: impl Fn(Edit) -> Message + Clone + 'text,
+) -> El<'text> {
     let saving = value != NO_FILE;
     let toggle = {
         let make = make.clone();
@@ -885,11 +970,12 @@ fn screenshot_field<'a>(
         }
     };
     let mut col = column![
-        toggler(saving)
-            .label("Save each screenshot to a file")
-            .text_size(13)
-            .on_toggle(toggle)
-            .size(20),
+        row![
+            crate::motion::switch(saving, state.motions.switch).on_toggle(toggle),
+            text("Save each screenshot to a file").size(13),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
     ]
     .spacing(8);
     if !saving {
@@ -904,7 +990,7 @@ fn screenshot_field<'a>(
     let effective = if value.trim().is_empty() {
         default.to_string()
     } else {
-        value.clone()
+        value.to_string()
     };
     let (folder, file) = split_path(&effective);
     let (shown_folder, shown_file) = if value.trim().is_empty() {
@@ -918,12 +1004,9 @@ fn screenshot_field<'a>(
         let file = file.clone();
         move |input: String| make(Edit::Draft(join_path(&input, &file)))
     };
-    let on_file = {
-        let make = make.clone();
-        move |input: String| make(Edit::Draft(join_path(&folder, &input)))
-    };
+    let on_file = move |input: String| make(Edit::Draft(join_path(&folder, &input)));
     let browse = Message::Browse {
-        target: Box::new(make(Edit::Draft(join_path(&HOLE.to_string(), &file)))),
+        to: Destination::Field(key.clone(), join_path(&HOLE.to_string(), &file)),
         folder: true,
     };
     col = col
@@ -999,14 +1082,14 @@ impl canvas::Program<Message, Theme, Renderer> for SizesPreview {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
-        let c = theme::colors(theme);
+        let colors = theme::colors(theme);
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c.canvas);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), colors.canvas);
         let pad = 8.0;
         let label = |content: String, position: Point| canvas::Text {
             content,
             position,
-            color: c.text,
+            color: colors.text,
             size: 11.0.into(),
             font: Font::default(),
             align_y: iced::alignment::Vertical::Center,
@@ -1017,19 +1100,23 @@ impl canvas::Program<Message, Theme, Renderer> for SizesPreview {
             Axis::Width => {
                 let width = 2.0f32.mul_add(-pad, bounds.width);
                 for (index, (part, name)) in self.bars.iter().enumerate() {
-                    let y = (index as f32).mul_add(24.0, pad);
-                    frame.fill_rectangle(Point::new(pad, y), Size::new(width, 18.0), c.surface);
+                    let top = (index as f32).mul_add(24.0, pad);
                     frame.fill_rectangle(
-                        Point::new(pad, y),
+                        Point::new(pad, top),
+                        Size::new(width, 18.0),
+                        colors.surface,
+                    );
+                    frame.fill_rectangle(
+                        Point::new(pad, top),
                         Size::new(width * part, 18.0),
                         Color {
                             a: 0.45,
-                            ..c.accent
+                            ..colors.accent
                         },
                     );
                     frame.fill_text(label(
                         format!("{name}, {} px", (part * self.screen.width).round()),
-                        Point::new(pad + 6.0, y + 9.0),
+                        Point::new(pad + 6.0, top + 9.0),
                     ));
                 }
             }
@@ -1037,20 +1124,24 @@ impl canvas::Program<Message, Theme, Renderer> for SizesPreview {
                 let height = 2.0f32.mul_add(-pad, bounds.height);
                 let column = 90.0;
                 for (index, (part, name)) in self.bars.iter().enumerate() {
-                    let x = (index as f32).mul_add(column + 8.0, pad);
-                    frame.fill_rectangle(Point::new(x, pad), Size::new(column, height), c.surface);
+                    let left = (index as f32).mul_add(column + 8.0, pad);
+                    frame.fill_rectangle(
+                        Point::new(left, pad),
+                        Size::new(column, height),
+                        colors.surface,
+                    );
                     let bar = height * part;
                     frame.fill_rectangle(
-                        Point::new(x, pad + height - bar),
+                        Point::new(left, pad + height - bar),
                         Size::new(column, bar),
                         Color {
                             a: 0.45,
-                            ..c.accent
+                            ..colors.accent
                         },
                     );
                     frame.fill_text(label(
                         format!("{name}, {} px", (part * self.screen.height).round()),
-                        Point::new(x + 6.0, pad + 10.0),
+                        Point::new(left + 6.0, pad + 10.0),
                     ));
                 }
             }

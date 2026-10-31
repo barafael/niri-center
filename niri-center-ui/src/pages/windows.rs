@@ -13,9 +13,9 @@ use crate::{El, theme};
 
 pub fn windows(state: &App) -> El<'_> {
     let mut col = column![small("Refresh now", Message::RunningTick)].spacing(18);
-    if let Some(e) = &state.running_error {
+    if let Some(error) = &state.running_error {
         col = col.push(
-            text(format!("niri did not answer: {e}"))
+            text(format!("niri did not answer: {error}"))
                 .size(13)
                 .style(theme::error),
         );

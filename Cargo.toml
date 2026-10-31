@@ -53,10 +53,45 @@ opt-level = 3
 [profile.web.package.cosmic-text]
 opt-level = 3
 
-# Defensive programming lints (corrode.dev/blog/defensive-programming):
-# put the compiler to work instead of relying on discipline.
+# Defensive programming lints (corrode.dev/blog/defensive-programming) and
+# lints that caught real defects in earlier projects: an error is never
+# swallowed, an index never panics, a cast never truncates unseen. Each is
+# chosen, not a whole group (CONTRIBUTING.md, Code rules).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [workspace.lints.clippy]
 wildcard_enum_match_arm = "deny"   # force new enum variants to be handled
 fallible_impl_from = "deny"        # From must never truncate/panic; use TryFrom
 unneeded_field_pattern = "deny"    # no silent field skipping via `..`
 fn_params_excessive_bools = "deny" # >4 booleans at a call site = bug magnet
+unwrap_used = "deny"               # no unwrap/expect/panic! outside tests (CONTRIBUTING.md)
+expect_used = "deny"
+panic = "deny"
+# errors are not swallowed: a discarded error keeps its source, or the
+# function returns Option
+map_err_ignore = "deny"
+let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"
+unused_result_ok = "deny"
+indexing_slicing = "deny"
+missing_fields_in_debug = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+redundant_clone = "deny"
+needless_pass_by_ref_mut = "deny"
+needless_pass_by_value = "deny"
+items_after_statements = "deny"
+manual_assert = "deny"
+match_same_arms = "deny"
+default_trait_access = "deny"
+format_push_string = "deny"
+map_unwrap_or = "deny"
+ignored_unit_patterns = "deny"
+redundant_closure_for_method_calls = "deny"
+derive_partial_eq_without_eq = "deny"
+bool_to_int_with_if = "deny"
+# its remedy is a Box, which lint/rules/no-box.yml refuses: a large variant
+# is moved, a copy per message, not an allocation
+large_enum_variant = "allow"

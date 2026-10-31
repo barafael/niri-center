@@ -13,6 +13,7 @@ mod keyboard;
 mod library;
 mod message;
 mod monitors;
+mod motion;
 mod pages;
 mod repair;
 mod rows;
@@ -32,7 +33,7 @@ use niri_center::page::Page;
 use app::App;
 use message::Message;
 
-type El<'a> = Element<'a, Message, Theme, iced::Renderer>;
+type El<'view> = Element<'view, Message, Theme, iced::Renderer>;
 
 /// Faces a browser lends the app none of: monospace for config paths and
 /// diffs, and the semibold that headings use (iced brings Fira Sans Regular).

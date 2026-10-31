@@ -5,6 +5,7 @@
 //!
 //! Every rule is checked against `niri validate` by the test suite.
 
+use crate::words::Words;
 use std::collections::HashSet;
 
 use crate::store::{RuleMeaning, Store, StoreError, WindowRuleRow};
@@ -117,26 +118,26 @@ impl KnownApp {
     /// Desktop file names it installs under when they differ from its ids.
     const fn desktop(self) -> &'static [&'static str] {
         match self {
-            Self::NiriCenter => &[],
-            Self::Firefox => &[],
-            Self::Wezterm => &[],
             Self::Steam => &["com.valvesoftware.Steam"],
-            Self::Keepassxc => &[],
-            Self::Secrets => &[],
             Self::Bitwarden => &["com.bitwarden.desktop"],
-            Self::OnePassword => &[],
-            Self::Telegram => &[],
             Self::Gimp => &["org.gimp.GIMP"],
-            Self::Pavucontrol => &[],
-            Self::Pwvucontrol => &[],
-            Self::GnomeCalculator => &[],
-            Self::Kcalc => &[],
-            Self::NetworkConnections => &[],
-            Self::Blueman => &[],
-            Self::QtSettings => &[],
             Self::Mpv => &["io.mpv.Mpv"],
-            Self::Obs => &[],
             Self::Fcitx => &["org.fcitx.Fcitx5", "fcitx5"],
+            Self::NiriCenter
+            | Self::Firefox
+            | Self::Wezterm
+            | Self::Keepassxc
+            | Self::Secrets
+            | Self::OnePassword
+            | Self::Telegram
+            | Self::Pavucontrol
+            | Self::Pwvucontrol
+            | Self::GnomeCalculator
+            | Self::Kcalc
+            | Self::NetworkConnections
+            | Self::Blueman
+            | Self::QtSettings
+            | Self::Obs => &[],
         }
     }
 
@@ -162,18 +163,49 @@ fn is_app(app_id: &str, id: &str) -> bool {
         && matches!(app_id.as_bytes().get(id.len()), None | Some(b'.'))
 }
 
+/// Where a library rule comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    NiriCenter,
+    NiriDefaultConfig,
+    NiriWiki,
+    SharedConfigs,
+    /// niri's issue tracker, by issue number.
+    NiriIssues(&'static [u32]),
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NiriCenter => out.write_str("niri-center"),
+            Self::NiriDefaultConfig => out.write_str("niri's default config"),
+            Self::NiriWiki => out.write_str("niri wiki"),
+            Self::SharedConfigs => out.write_str("shared niri configs"),
+            Self::NiriIssues([only]) => write!(out, "niri issue {only}"),
+            Self::NiriIssues(issues) => {
+                let numbers: Vec<String> = issues.iter().map(u32::to_string).collect();
+                match numbers.split_last() {
+                    Some((last, [])) => write!(out, "niri issue {last}"),
+                    Some((last, rest)) => write!(out, "niri issues {} and {last}", rest.join(", ")),
+                    None => out.write_str("niri's issues"),
+                }
+            }
+        }
+    }
+}
+
 /// One ready-made rule.
 pub struct LibraryRule {
     /// The app it is for; `None`: windows of any app.
     pub app: Option<KnownApp>,
-    pub name: &'static str,
-    pub why: &'static str,
-    pub kdl: &'static str,
+    pub name: Words,
+    pub why: Words,
+    pub kdl: Words,
     /// Where it comes from.
-    pub source: &'static str,
+    pub source: Origin,
     /// Windows it is for, as (app ID, title): the tests check that the
     /// rule reaches each, and that each of its app's IDs is among them.
-    pub examples: &'static [(&'static str, &'static str)],
+    pub examples: &'static [(Words, Words)],
 }
 
 /// Shared by the small apps that open, get used and close again.
@@ -184,43 +216,56 @@ pub const LIBRARY: [LibraryRule; 30] = [
     // ---- every window ----
     LibraryRule {
         app: None,
-        name: "Rounded corners on every window",
-        why: "The focus ring and border follow the corners. Apps that draw their own shadows may look clipped.",
-        kdl: r##"window-rule {
+        name: Words("Rounded corners on every window"),
+        why: Words(
+            "The focus ring and border follow the corners. Apps that draw their own shadows may look clipped.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     geometry-corner-radius 12
     clip-to-geometry true
 }"##,
-        source: "niri's default config",
+        ),
+        source: Origin::NiriDefaultConfig,
         examples: &[],
     },
     LibraryRule {
         app: None,
-        name: "Blur behind see-through windows",
-        why: "Shows only where a window is transparent, such as a terminal with a translucent background.",
-        kdl: r##"window-rule {
+        name: Words("Blur behind see-through windows"),
+        why: Words(
+            "Shows only where a window is transparent, such as a terminal with a translucent background.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     background-effect {
         blur true
     }
 }"##,
-        source: "niri-center",
+        ),
+        source: Origin::NiriCenter,
         examples: &[],
     },
     LibraryRule {
         app: None,
-        name: "Fade windows that do not have focus",
-        why: "Makes the active window stand out without a border.",
-        kdl: r##"window-rule {
+        name: Words("Fade windows that do not have focus"),
+        why: Words("Makes the active window stand out without a border."),
+        kdl: Words(
+            r##"window-rule {
     match is-active=false
     opacity 0.9
 }"##,
-        source: "niri-center",
+        ),
+        source: Origin::NiriCenter,
         examples: &[],
     },
     LibraryRule {
         app: None,
-        name: "Glow around windows that ask for attention",
-        why: "In niri's urgent red, also with the focus ring and border off. Such a window stays fully opaque, even where another rule fades it.",
-        kdl: r##"window-rule {
+        name: Words("Glow around windows that ask for attention"),
+        why: Words(
+            "In niri's urgent red, also with the focus ring and border off. Such a window stays fully opaque, even where another rule fades it.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match is-urgent=true
     opacity 1.0
     shadow {
@@ -231,14 +276,18 @@ pub const LIBRARY: [LibraryRule; 30] = [
         color "#9b0000cc"
     }
 }"##,
-        source: "niri-center",
+        ),
+        source: Origin::NiriCenter,
         examples: &[],
     },
     LibraryRule {
         app: None,
-        name: "Red ring around a window being screencast",
-        why: "When you share a single window, you can see which one, even with the focus ring off.",
-        kdl: r##"window-rule {
+        name: Words("Red ring around a window being screencast"),
+        why: Words(
+            "When you share a single window, you can see which one, even with the focus ring off.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match is-window-cast-target=true
     focus-ring {
         on
@@ -246,310 +295,400 @@ pub const LIBRARY: [LibraryRule; 30] = [
         inactive-color "#7d0d2d"
     }
 }"##,
-        source: "niri wiki",
+        ),
+        source: Origin::NiriWiki,
         examples: &[],
     },
     LibraryRule {
         app: None,
-        name: "Picture-in-Picture videos float",
-        why: "Firefox and Chromium name the window Picture-in-Picture.",
-        kdl: r##"window-rule {
+        name: Words("Picture-in-Picture videos float"),
+        why: Words("Firefox and Chromium name the window Picture-in-Picture."),
+        kdl: Words(
+            r##"window-rule {
     match title="^Picture-in-Picture$"
     open-floating true
 }"##,
-        source: "niri's default config",
+        ),
+        source: Origin::NiriDefaultConfig,
         examples: &[
-            ("firefox", "Picture-in-Picture"),
-            ("org.mozilla.firefox", "Picture-in-Picture"),
+            (Words("firefox"), Words("Picture-in-Picture")),
+            (Words("org.mozilla.firefox"), Words("Picture-in-Picture")),
         ],
     },
     LibraryRule {
         app: None,
-        name: "File choosers float",
-        why: "niri floats a dialog its app claims. Some apps open the file chooser without saying whose it is, and then it tiles.",
-        kdl: r##"window-rule {
+        name: Words("File choosers float"),
+        why: Words(
+            "niri floats a dialog its app claims. Some apps open the file chooser without saying whose it is, and then it tiles.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^xdg-desktop-portal"#
     open-floating true
 }"##,
-        source: "niri issues 2831 and 3895",
+        ),
+        source: Origin::NiriIssues(&[2831, 3895]),
         examples: &[
-            ("xdg-desktop-portal-gtk", "Open File"),
-            ("xdg-desktop-portal-gnome", "Save File"),
+            (Words("xdg-desktop-portal-gtk"), Words("Open File")),
+            (Words("xdg-desktop-portal-gnome"), Words("Save File")),
         ],
     },
     LibraryRule {
         app: None,
-        name: "SSH passphrase prompts float",
-        why: "The prompt ssh-askpass opens when a key needs its passphrase.",
-        kdl: r##"window-rule {
+        name: Words("SSH passphrase prompts float"),
+        why: Words("The prompt ssh-askpass opens when a key needs its passphrase."),
+        kdl: Words(
+            r##"window-rule {
     match title="^OpenSSH Authentication Passphrase request$"
     open-floating true
 }"##,
-        source: "shared niri configs",
-        examples: &[("", "OpenSSH Authentication Passphrase request")],
+        ),
+        source: Origin::SharedConfigs,
+        examples: &[(
+            Words(""),
+            Words("OpenSSH Authentication Passphrase request"),
+        )],
     },
     // ---- apps ----
     LibraryRule {
         app: Some(KnownApp::NiriCenter),
-        name: "Pages in their own window open floating",
-        why: "A page opened on its own (Open in its own window, or --pane) floats; the main window keeps tiling.",
-        kdl: crate::store::SUGGESTED_WINDOW_RULES,
-        source: "niri-center",
-        examples: &[("niri-center.displays", "Displays")],
+        name: Words("Pages in their own window open floating"),
+        why: Words(
+            "A page opened on its own (Open in its own window, or --pane) floats; the main window keeps tiling.",
+        ),
+        kdl: Words(crate::store::SUGGESTED_WINDOW_RULES),
+        source: Origin::NiriCenter,
+        examples: &[(Words("niri-center.displays"), Words("Displays"))],
     },
     LibraryRule {
         app: Some(KnownApp::Firefox),
-        name: "Private windows stay out of screen recordings",
-        why: "They show as a black box to anyone watching a screen share.",
-        kdl: r##"window-rule {
+        name: Words("Private windows stay out of screen recordings"),
+        why: Words("They show as a black box to anyone watching a screen share."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"firefox$"# title="Private Browsing"
     block-out-from "screencast"
 }"##,
-        source: "niri-center",
+        ),
+        source: Origin::NiriCenter,
         examples: &[
-            ("firefox", "Mozilla Firefox Private Browsing"),
-            ("org.mozilla.firefox", "Mozilla Firefox Private Browsing"),
+            (Words("firefox"), Words("Mozilla Firefox Private Browsing")),
+            (
+                Words("org.mozilla.firefox"),
+                Words("Mozilla Firefox Private Browsing"),
+            ),
         ],
     },
     LibraryRule {
         app: Some(KnownApp::Firefox),
-        name: "The sharing indicator floats",
-        why: "The small bar Firefox shows while your camera, microphone or screen is shared.",
-        kdl: r##"window-rule {
+        name: Words("The sharing indicator floats"),
+        why: Words(
+            "The small bar Firefox shows while your camera, microphone or screen is shared.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"firefox$"# title="Sharing Indicator$"
     open-floating true
 }"##,
-        source: "shared niri configs",
+        ),
+        source: Origin::SharedConfigs,
         examples: &[
-            ("firefox", "Firefox \u{2014} Sharing Indicator"),
-            ("org.mozilla.firefox", "Firefox \u{2014} Sharing Indicator"),
+            (
+                Words("firefox"),
+                Words("Firefox \u{2014} Sharing Indicator"),
+            ),
+            (
+                Words("org.mozilla.firefox"),
+                Words("Firefox \u{2014} Sharing Indicator"),
+            ),
         ],
     },
     LibraryRule {
         app: Some(KnownApp::Wezterm),
-        name: "Opens at the size it asks for",
-        why: "WezTerm waits for a size of its own before it shows, so without this its window may never appear.",
-        kdl: r##"window-rule {
+        name: Words("Opens at the size it asks for"),
+        why: Words(
+            "WezTerm waits for a size of its own before it shows, so without this its window may never appear.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^org\.wezfurlong\.wezterm$"#
     default-column-width {}
 }"##,
-        source: "niri's default config",
-        examples: &[("org.wezfurlong.wezterm", "wezterm")],
+        ),
+        source: Origin::NiriDefaultConfig,
+        examples: &[(Words("org.wezfurlong.wezterm"), Words("wezterm"))],
     },
     LibraryRule {
         app: Some(KnownApp::Steam),
-        name: "Notifications float in the bottom-right corner",
-        why: "Steam opens its notifications as windows of their own, in the middle of the screen.",
-        kdl: r##"window-rule {
+        name: Words("Notifications float in the bottom-right corner"),
+        why: Words(
+            "Steam opens its notifications as windows of their own, in the middle of the screen.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match app-id="steam" title=r#"^notificationtoasts_\d+_desktop$"#
     default-floating-position x=10 y=10 relative-to="bottom-right"
 }"##,
-        source: "niri wiki",
-        examples: &[("steam", "notificationtoasts_12_desktop")],
+        ),
+        source: Origin::NiriWiki,
+        examples: &[(Words("steam"), Words("notificationtoasts_12_desktop"))],
     },
     LibraryRule {
         app: Some(KnownApp::Keepassxc),
-        name: "Hidden from screen recordings",
-        why: "The password list shows as a black box to anyone watching a screen share.",
-        kdl: r##"window-rule {
+        name: Words("Hidden from screen recordings"),
+        why: Words("The password list shows as a black box to anyone watching a screen share."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^org\.keepassxc\.KeePassXC$"#
     block-out-from "screencast"
 }"##,
-        source: "niri's default config",
-        examples: &[("org.keepassxc.KeePassXC", "Passwords.kdbx - KeePassXC")],
+        ),
+        source: Origin::NiriDefaultConfig,
+        examples: &[(
+            Words("org.keepassxc.KeePassXC"),
+            Words("Passwords.kdbx - KeePassXC"),
+        )],
     },
     LibraryRule {
         app: Some(KnownApp::Keepassxc),
-        name: "The unlock dialog takes focus",
-        why: "So you can type the password as soon as a browser asks KeePassXC for one.",
-        kdl: r##"window-rule {
+        name: Words("The unlock dialog takes focus"),
+        why: Words("So you can type the password as soon as a browser asks KeePassXC for one."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^org\.keepassxc\.KeePassXC$"# title="^Unlock Database - KeePassXC$"
     open-focused true
 }"##,
-        source: "niri wiki",
-        examples: &[("org.keepassxc.KeePassXC", "Unlock Database - KeePassXC")],
+        ),
+        source: Origin::NiriWiki,
+        examples: &[(
+            Words("org.keepassxc.KeePassXC"),
+            Words("Unlock Database - KeePassXC"),
+        )],
     },
     LibraryRule {
         app: Some(KnownApp::Secrets),
-        name: "Hidden from screen recordings",
-        why: "The password list shows as a black box to anyone watching a screen share.",
-        kdl: r##"window-rule {
+        name: Words("Hidden from screen recordings"),
+        why: Words("The password list shows as a black box to anyone watching a screen share."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^org\.gnome\.World\.Secrets$"#
     block-out-from "screencast"
 }"##,
-        source: "niri's default config",
-        examples: &[("org.gnome.World.Secrets", "Secrets")],
+        ),
+        source: Origin::NiriDefaultConfig,
+        examples: &[(Words("org.gnome.World.Secrets"), Words("Secrets"))],
     },
     LibraryRule {
         app: Some(KnownApp::Bitwarden),
-        name: "Hidden from screen recordings",
-        why: "The vault shows as a black box to anyone watching a screen share.",
-        kdl: r##"window-rule {
+        name: Words("Hidden from screen recordings"),
+        why: Words("The vault shows as a black box to anyone watching a screen share."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^Bitwarden$"#
     block-out-from "screencast"
 }"##,
-        source: "niri-center",
-        examples: &[("Bitwarden", "Bitwarden")],
+        ),
+        source: Origin::NiriCenter,
+        examples: &[(Words("Bitwarden"), Words("Bitwarden"))],
     },
     LibraryRule {
         app: Some(KnownApp::OnePassword),
-        name: "Hidden from screen recordings",
-        why: "The vault shows as a black box to anyone watching a screen share.",
-        kdl: r##"window-rule {
+        name: Words("Hidden from screen recordings"),
+        why: Words("The vault shows as a black box to anyone watching a screen share."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^1Password$"#
     block-out-from "screencast"
 }"##,
-        source: "niri-center",
-        examples: &[("1Password", "1Password")],
+        ),
+        source: Origin::NiriCenter,
+        examples: &[(Words("1Password"), Words("1Password"))],
     },
     LibraryRule {
         app: Some(KnownApp::Telegram),
-        name: "The media viewer opens in a window",
-        why: "Telegram shows photos and videos fullscreen; this keeps them in a window you can tile.",
-        kdl: r##"window-rule {
+        name: Words("The media viewer opens in a window"),
+        why: Words(
+            "Telegram shows photos and videos fullscreen; this keeps them in a window you can tile.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^org\.telegram\.desktop$"# title="^Media viewer$"
     open-fullscreen false
 }"##,
-        source: "niri wiki",
-        examples: &[("org.telegram.desktop", "Media viewer")],
+        ),
+        source: Origin::NiriWiki,
+        examples: &[(Words("org.telegram.desktop"), Words("Media viewer"))],
     },
     LibraryRule {
         app: Some(KnownApp::Gimp),
-        name: "The startup splash does not take focus",
-        why: "You can keep working in another window while GIMP starts.",
-        kdl: r##"window-rule {
+        name: Words("The startup splash does not take focus"),
+        why: Words("You can keep working in another window while GIMP starts."),
+        kdl: Words(
+            r##"window-rule {
     match app-id="^gimp" title="^GIMP Startup$"
     open-focused false
 }"##,
-        source: "niri wiki",
-        examples: &[("gimp", "GIMP Startup")],
+        ),
+        source: Origin::NiriWiki,
+        examples: &[(Words("gimp"), Words("GIMP Startup"))],
     },
     LibraryRule {
         app: Some(KnownApp::Pavucontrol),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^(org\.pulseaudio\.)?pavucontrol$"#
     open-floating true
 }"##,
-        source: "shared niri configs",
+        ),
+        source: Origin::SharedConfigs,
         examples: &[
-            ("org.pulseaudio.pavucontrol", "Volume Control"),
-            ("pavucontrol", "Volume Control"),
+            (Words("org.pulseaudio.pavucontrol"), Words("Volume Control")),
+            (Words("pavucontrol"), Words("Volume Control")),
         ],
     },
     LibraryRule {
         app: Some(KnownApp::Pwvucontrol),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^com\.saivert\.pwvucontrol$"#
     open-floating true
 }"##,
-        source: "shared niri configs",
-        examples: &[("com.saivert.pwvucontrol", "Pipewire Volume Control")],
+        ),
+        source: Origin::SharedConfigs,
+        examples: &[(
+            Words("com.saivert.pwvucontrol"),
+            Words("Pipewire Volume Control"),
+        )],
     },
     LibraryRule {
         app: Some(KnownApp::GnomeCalculator),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^(org\.gnome\.Calculator|gnome-calculator)$"#
     open-floating true
 }"##,
-        source: "shared niri configs",
+        ),
+        source: Origin::SharedConfigs,
         examples: &[
-            ("org.gnome.Calculator", "Calculator"),
-            ("gnome-calculator", "Calculator"),
+            (Words("org.gnome.Calculator"), Words("Calculator")),
+            (Words("gnome-calculator"), Words("Calculator")),
         ],
     },
     LibraryRule {
         app: Some(KnownApp::Kcalc),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^org\.kde\.kcalc$"#
     open-floating true
 }"##,
-        source: "shared niri configs",
-        examples: &[("org.kde.kcalc", "KCalc")],
+        ),
+        source: Origin::SharedConfigs,
+        examples: &[(Words("org.kde.kcalc"), Words("KCalc"))],
     },
     LibraryRule {
         app: Some(KnownApp::NetworkConnections),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id="^nm-connection-editor$"
     open-floating true
 }"##,
-        source: "shared niri configs",
-        examples: &[("nm-connection-editor", "Network Connections")],
+        ),
+        source: Origin::SharedConfigs,
+        examples: &[(Words("nm-connection-editor"), Words("Network Connections"))],
     },
     LibraryRule {
         app: Some(KnownApp::Blueman),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id="^blueman-manager$"
     open-floating true
 }"##,
-        source: "shared niri configs",
-        examples: &[("blueman-manager", "Bluetooth Devices")],
+        ),
+        source: Origin::SharedConfigs,
+        examples: &[(Words("blueman-manager"), Words("Bluetooth Devices"))],
     },
     LibraryRule {
         app: Some(KnownApp::QtSettings),
-        name: "Opens floating",
-        why: SMALL_WINDOW,
-        kdl: r##"window-rule {
+        name: Words("Opens floating"),
+        why: Words(SMALL_WINDOW),
+        kdl: Words(
+            r##"window-rule {
     match app-id="^qt[56]ct$"
     open-floating true
 }"##,
-        source: "shared niri configs",
+        ),
+        source: Origin::SharedConfigs,
         examples: &[
-            ("qt5ct", "Qt5 Configuration Tool"),
-            ("qt6ct", "Qt6 Configuration Tool"),
+            (Words("qt5ct"), Words("Qt5 Configuration Tool")),
+            (Words("qt6ct"), Words("Qt6 Configuration Tool")),
         ],
     },
     LibraryRule {
         app: Some(KnownApp::Mpv),
-        name: "Variable refresh rate while it shows",
-        why: "On a display set to on-demand VRR, video plays at its own frame rate while mpv is on screen.",
-        kdl: r##"window-rule {
+        name: Words("Variable refresh rate while it shows"),
+        why: Words(
+            "On a display set to on-demand VRR, video plays at its own frame rate while mpv is on screen.",
+        ),
+        kdl: Words(
+            r##"window-rule {
     match app-id="^mpv$"
     variable-refresh-rate true
 }"##,
-        source: "niri wiki",
-        examples: &[("mpv", "video.mkv - mpv")],
+        ),
+        source: Origin::NiriWiki,
+        examples: &[(Words("mpv"), Words("video.mkv - mpv"))],
     },
     LibraryRule {
         app: Some(KnownApp::Obs),
-        name: "Keeps a width its controls fit in",
-        why: "Narrower than this, OBS lays its controls over each other.",
-        kdl: r##"window-rule {
+        name: Words("Keeps a width its controls fit in"),
+        why: Words("Narrower than this, OBS lays its controls over each other."),
+        kdl: Words(
+            r##"window-rule {
     match app-id=r#"^com\.obsproject\.Studio$"#
     min-width 876
 }"##,
-        source: "niri wiki",
-        examples: &[("com.obsproject.Studio", "OBS 31.0.0 - Profile: Untitled")],
+        ),
+        source: Origin::NiriWiki,
+        examples: &[(
+            Words("com.obsproject.Studio"),
+            Words("OBS 31.0.0 - Profile: Untitled"),
+        )],
     },
     LibraryRule {
         app: Some(KnownApp::Fcitx),
-        name: "The input window floats",
-        why: "Otherwise niri tiles Fcitx5's candidate list as a column of its own.",
-        kdl: r##"window-rule {
+        name: Words("The input window floats"),
+        why: Words("Otherwise niri tiles Fcitx5's candidate list as a column of its own."),
+        kdl: Words(
+            r##"window-rule {
     match app-id="^fcitx$" title="^Fcitx5 Input Window$"
     open-floating true
 }"##,
-        source: "niri issue 3917",
-        examples: &[("fcitx", "Fcitx5 Input Window")],
+        ),
+        source: Origin::NiriIssues(&[3917]),
+        examples: &[(Words("fcitx"), Words("Fcitx5 Input Window"))],
     },
 ];
 
 /// The library rules for one app, by its app ID: `niri-center.displays`
 /// counts as niri-center.
 pub fn for_app(app_id: &str) -> Vec<usize> {
-    (0..LIBRARY.len())
-        .filter(|&index| LIBRARY[index].app.is_some_and(|app| app.owns(app_id)))
+    LIBRARY
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| rule.app.is_some_and(|app| app.owns(app_id)))
+        .map(|(index, _)| index)
         .collect()
 }
 
@@ -579,7 +718,10 @@ pub fn apps(system: &SystemData, all: bool) -> Vec<Option<KnownApp>> {
             apps.push(Some(app));
         }
     }
-    apps[1..].sort_by_cached_key(|app| app.map(|app| app.name().to_lowercase()));
+    // "every app" stays first, the apps follow by name
+    if let Some(named) = apps.get_mut(1..) {
+        named.sort_by_cached_key(|app| app.map(|app| app.name().to_lowercase()));
+    }
     apps
 }
 
@@ -594,7 +736,7 @@ impl Default for Meanings {
             LIBRARY
                 .iter()
                 .map(|rule| {
-                    let store = Store::from_text("library.kdl".into(), rule.kdl).ok()?;
+                    let store = Store::from_text("library.kdl".into(), &rule.kdl).ok()?;
                     store.window_rule_rows().first().map(WindowRuleRow::meaning)
                 })
                 .collect(),
@@ -627,9 +769,9 @@ impl Meanings {
 pub fn import(store: &mut Store, marked: &[usize], into_config: bool) -> Result<(), StoreError> {
     for rule in marked.iter().filter_map(|&index| LIBRARY.get(index)) {
         if into_config {
-            store.add_window_rule_text(rule.kdl)?;
+            store.add_window_rule_text(&rule.kdl)?;
         } else {
-            store.add_to_include(FILE, rule.kdl)?;
+            store.add_to_include(FILE, &rule.kdl)?;
         }
     }
     Ok(())
@@ -644,7 +786,7 @@ mod tests {
     #[test]
     fn every_library_rule_reaches_the_windows_it_is_for() {
         for rule in &LIBRARY {
-            let rows = Store::from_text("config.kdl".into(), rule.kdl)
+            let rows = Store::from_text("config.kdl".into(), &rule.kdl)
                 .unwrap()
                 .window_rule_rows();
             let [row] = rows.as_slice() else {
@@ -685,7 +827,7 @@ mod tests {
         let floating = |app_id: &str| {
             for_app(app_id)
                 .into_iter()
-                .map(|index| LIBRARY[index].name)
+                .map(|index| LIBRARY[index].name.as_str())
                 .collect::<Vec<_>>()
         };
         assert_eq!(floating("pavucontrol"), ["Opens floating"]);

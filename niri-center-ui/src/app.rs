@@ -4,10 +4,11 @@
 use std::collections::VecDeque;
 
 use iced::Task;
-use niri_center::animations::{self, Editor};
+use niri_center::animations::{self, Animation, Editor};
 use niri_center::color::GradientEnd;
 use niri_center::disk::actor::Command;
 use niri_center::forms::{BindingForm, RuleDraft, follow};
+use niri_center::motion::Played;
 use niri_center::niri::{self, OpenWindow, Running};
 use niri_center::outputs::OutputInfo;
 use niri_center::page::Page;
@@ -53,7 +54,7 @@ pub fn error(text: impl Into<String>) -> Option<StatusLine> {
 pub fn outcome(result: Result<(), StoreError>, done: impl Into<String>) -> Option<StatusLine> {
     match result {
         Ok(()) => info(done),
-        Err(e) => error(e.to_string()),
+        Err(failure) => error(failure.to_string()),
     }
 }
 
@@ -61,7 +62,7 @@ pub fn outcome(result: Result<(), StoreError>, done: impl Into<String>) -> Optio
 pub fn said(result: Result<String, String>) -> Option<StatusLine> {
     match result {
         Ok(done) => info(done),
-        Err(e) => error(e),
+        Err(failure) => error(failure),
     }
 }
 
@@ -94,9 +95,21 @@ pub enum Closing {
 #[derive(Debug, Clone)]
 pub struct ColorEdit {
     pub field: ColorField,
-    /// The message a picked color goes into, with its hole to fill.
-    pub target: Box<Message>,
+    /// Where a picked color goes.
+    pub target: crate::controls::Destination,
     pub hsva: color::Hsva,
+}
+
+/// How the app's own movements play, from niri's animations in the
+/// config: read again only when the config changes.
+#[derive(Debug, Default)]
+pub struct Motions {
+    /// The config revision they were read from; `None` before the first.
+    revision: Option<Option<u64>>,
+    /// A switch's knob, as niri moves a window.
+    pub switch: Option<Played>,
+    /// A notice dropping in from the top, as niri's config notification.
+    pub notice: Option<Played>,
 }
 
 #[derive(Default)]
@@ -130,6 +143,9 @@ pub struct App {
     pub startup: pages::startup::State,
     /// The Animations page's editor.
     pub animation: Editor,
+    pub motions: Motions,
+    /// Why the editor's motion is not in the config: a field it cannot read.
+    pub animation_problem: Option<String>,
     pub rules: pages::rules::State,
     // displays, windows, events
     pub outputs: Vec<OutputInfo>,
@@ -158,6 +174,8 @@ pub struct App {
     // the history
     /// The config shows beside the page: only when asked for.
     pub source_shown: bool,
+    /// Files the Config file page shows folded to their heading.
+    pub folded_files: std::collections::HashSet<std::path::PathBuf>,
     /// The sidebar folded to icons (true) or open; `None` follows the
     /// window's width.
     pub sidebar_folded: Option<bool>,
@@ -203,8 +221,14 @@ pub mod room {
     pub const RULES_BESIDE_LIST: f32 = 600.0;
     /// The Displays page shows a display's settings beside the list.
     pub const DISPLAY_BESIDE_LIST: f32 = 960.0;
+    /// History shows the version open beside the list: the list's 380 px
+    /// and a diff wide enough for most lines of a config.
+    pub const HISTORY_BESIDE_LIST: f32 = 960.0;
     /// The keyboard and the bindings sit side by side (with the height).
     pub const KEYBOARD_BESIDE_BINDINGS: f32 = 1000.0;
+    /// A window this tall keeps the keyboard in place above the bindings,
+    /// which scroll under it; shorter, the list would be a sliver.
+    pub const KEYBOARD_ABOVE_BINDINGS: f32 = 760.0;
 
     const _: () = {
         use super::{PAGE_CAP, SETTINGS_CAP};
@@ -213,6 +237,7 @@ pub mod room {
         assert!(MATCH_BESIDE_TEXT < PAGE_CAP);
         assert!(RULES_BESIDE_LIST < PAGE_CAP);
         assert!(DISPLAY_BESIDE_LIST < PAGE_CAP);
+        assert!(HISTORY_BESIDE_LIST < PAGE_CAP);
         assert!(KEYBOARD_BESIDE_BINDINGS < PAGE_CAP);
     };
 }
@@ -248,7 +273,7 @@ impl App {
         let listen = Task::stream(iced::futures::stream::poll_fn(move |context| {
             answers.poll_recv(context)
         }))
-        .map(|reply| Message::Disk(Box::new(reply)));
+        .map(Message::Disk);
         app.disk = Some(commands);
         match niri_center::start::config_path() {
             Some(path) => app.session.start(path),
@@ -267,10 +292,7 @@ impl App {
             niri_run,
             niri_listen,
             app.ask_niri(niri::Command::Outputs),
-            tasks::blocking(
-                || Box::new(niri_center::start::system()),
-                Message::SystemLoaded,
-            ),
+            tasks::blocking(niri_center::start::system, Message::SystemLoaded),
             iced::system::theme().map(Message::ModeLoaded),
             Task::perform(
                 niri_center::portal::high_contrast(),
@@ -318,10 +340,15 @@ impl App {
 
     /// Whether the Keybinds page puts the keyboard and the bindings side
     /// by side, the list scrolling on its own: when the window is wide and
-    /// tall enough. A half or third of the screen stacks them and scrolls
-    /// the page.
+    /// tall enough. A half or third of the screen stacks them.
     pub fn keybinds_pinned(&self) -> bool {
         self.content_width() >= room::KEYBOARD_BESIDE_BINDINGS && self.height() >= room::TALL
+    }
+
+    /// Whether the stacked Keybinds page keeps the keyboard in place, the
+    /// bindings scrolling under it; else the page scrolls as a whole.
+    pub fn keyboard_stays(&self) -> bool {
+        self.height() >= room::KEYBOARD_ABOVE_BINDINGS
     }
 
     /// Whether the Window rules page shows its index of apps beside the app
@@ -330,6 +357,13 @@ impl App {
     /// page scrolls.
     pub fn rules_beside_list(&self) -> bool {
         self.content_width() >= room::RULES_BESIDE_LIST && self.height() >= room::TALL
+    }
+
+    /// Whether History shows the version open beside the list, each
+    /// scrolling on its own so the version's title and its Restore stay in
+    /// view. Narrower, one shows at a time.
+    pub fn history_beside_list(&self) -> bool {
+        self.content_width() >= room::HISTORY_BESIDE_LIST
     }
 
     /// Whether something is open over the page: the search, a card or a
@@ -345,8 +379,13 @@ impl App {
 
     /// Whether the page scrolls its own columns, under a heading that stays.
     pub fn page_scrolls_itself(&self) -> bool {
-        (self.page == Page::Keybinds && self.keybinds_pinned())
+        (self.page == Page::Keybinds && (self.keybinds_pinned() || self.keyboard_stays()))
             || (self.page == Page::Rules && self.rules_beside_list())
+            || self.page == Page::Source
+            || (self.page == Page::History
+                && self.history_beside_list()
+                && self.height() >= room::TALL
+                && !self.session.history.is_empty())
     }
 
     /// Whether the config source shows beside the page: on pages that edit
@@ -441,6 +480,25 @@ impl App {
         self.refresh_by_app();
     }
 
+    /// The Animations editor shows the config as it is now, problems gone.
+    pub fn reload_animation_editor(&mut self) {
+        self.animation.reload(self.session.store.as_ref());
+        self.animation_problem = None;
+    }
+
+    /// Read how the app moves again when the config changed.
+    pub fn refresh_motions(&mut self) {
+        let revision = Some(self.store().map(Store::revision));
+        if revision != self.motions.revision {
+            let store = self.store();
+            self.motions = Motions {
+                revision,
+                switch: niri_center::motion::played(store, Animation::WindowMovement),
+                notice: niri_center::motion::played(store, Animation::ConfigNotificationOpenClose),
+            };
+        }
+    }
+
     /// Gather the rules and the open windows by app again when either
     /// changed since, or what is installed came in.
     fn refresh_by_app(&mut self) {
@@ -471,8 +529,8 @@ impl App {
         {
             let new = &self.rows.rules;
             let follow = |index| {
-                follow(&old.rules, new, index, |a, b| {
-                    a.criteria == b.criteria && a.properties == b.properties
+                follow(&old.rules, new, index, |old_row, new_row| {
+                    old_row.criteria == new_row.criteria && old_row.properties == new_row.properties
                 })
             };
             self.rules.open = self.rules.open.and_then(follow);
@@ -489,9 +547,16 @@ impl App {
                 .and_then(|(editing, content)| Some((follow(editing)?, content)));
         }
         if let Some(editing) = self.keybinds.form.as_ref().and_then(|form| form.editing) {
-            let moved = follow(&old.bindings, &self.rows.bindings, editing, |a, b| {
-                a.key == b.key && a.action_raw == b.action_raw && a.file == b.file
-            });
+            let moved = follow(
+                &old.bindings,
+                &self.rows.bindings,
+                editing,
+                |old_row, new_row| {
+                    old_row.key == new_row.key
+                        && old_row.action_raw == new_row.action_raw
+                        && old_row.file == new_row.file
+                },
+            );
             self.keybinds.form = self.keybinds.form.take().and_then(|form| {
                 Some(BindingForm {
                     editing: Some(moved?),
@@ -511,12 +576,18 @@ impl App {
         self.session.ask(Command::Listing);
     }
 
-    /// Ask the niri actor. Its answer comes back as a message.
-    pub fn ask_niri(&self, command: niri::Command) -> Task<Message> {
-        if let Some(niri) = &self.niri {
+    /// Tell the niri actor. Its answer comes back as a message.
+    pub fn tell_niri(&self, command: niri::Command) {
+        if let Some(niri) = &self.niri
+            && niri.send(command).is_err()
+        {
             // the actor is gone only as the app closes
-            let _ = niri.send(command);
         }
+    }
+
+    /// [`Self::tell_niri`], for an `update` arm that has nothing else to do.
+    pub fn ask_niri(&self, command: niri::Command) -> Task<Message> {
+        self.tell_niri(command);
         Task::none()
     }
 
@@ -526,8 +597,9 @@ impl App {
             return;
         };
         for command in self.session.take_commands() {
-            // the actor is gone only as the app closes
-            let _ = disk.send(command);
+            if disk.send(command).is_err() {
+                // the actor is gone only as the app closes
+            }
         }
     }
 

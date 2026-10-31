@@ -28,7 +28,7 @@ pub struct SnapshotFiles {
 fn slug(name: &str) -> Option<String> {
     let cleaned: String = name
         .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .filter(|character| character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
         .collect::<String>()
         .trim()
         .trim_start_matches('.')
@@ -83,7 +83,7 @@ pub fn list(dir: &Path) -> Vec<SnapshotMeta> {
                 let mut lines = text.lines();
                 let created = lines
                     .next()
-                    .and_then(|s| s.parse::<u128>().ok())
+                    .and_then(|text| text.parse::<u128>().ok())
                     .unwrap_or(0);
                 let stored_name = lines.next().unwrap_or(&name);
                 let display = if stored_name.is_empty() {
@@ -101,7 +101,7 @@ pub fn list(dir: &Path) -> Vec<SnapshotMeta> {
             note,
         });
     }
-    out.sort_by_key(|s| s.created_nanos);
+    out.sort_by_key(|snapshot| snapshot.created_nanos);
     out
 }
 
@@ -114,7 +114,7 @@ pub fn load(dir: &Path, name: &str) -> io::Result<SnapshotFiles> {
         if !path.is_file() {
             continue;
         }
-        if path.file_name().and_then(|s| s.to_str()) == Some(".meta") {
+        if path.file_name().and_then(|name| name.to_str()) == Some(".meta") {
             continue;
         }
         let display = entry.file_name().to_string_lossy().into_owned();
@@ -163,7 +163,7 @@ mod tests {
             loaded
                 .files
                 .iter()
-                .any(|(n, c)| n == "config.kdl" && c == "a")
+                .any(|(name, content)| name == "config.kdl" && content == "a")
         );
         assert_eq!(loaded.note, "first snapshot");
 

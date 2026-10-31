@@ -124,7 +124,7 @@ pub fn validate(path: &Path) -> Result<Report, ValidateError> {
 /// Whether niri reads the config at `path`: its words when it does not,
 /// or why it could not be asked.
 pub fn reads(path: &Path) -> Result<(), String> {
-    let report = validate(path).map_err(|e| e.to_string())?;
+    let report = validate(path).map_err(|error| error.to_string())?;
     if report.ok {
         Ok(())
     } else {
@@ -147,12 +147,25 @@ pub fn niri_available() -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests that ask niri pass without it by skipping. CI's image
+    /// carries niri, so there a missing niri fails instead of passing
+    /// unchecked.
+    #[test]
+    fn niri_is_there_in_ci() {
+        if std::env::var_os("CI").is_some() {
+            assert!(
+                niri_available(),
+                "CI is set but `niri` does not run: every test that asks niri would skip"
+            );
+        }
+    }
 
     /// niri 26.04's words for a misspelled name in an included file.
     const INCLUDED: &str = "Error:   × error loading config
@@ -182,7 +195,7 @@ Error:   × unexpected node `numlok`
         let found = diagnostics(INCLUDED);
         let unknown = found
             .iter()
-            .find(|d| matches!(d.kind, DiagnosticKind::UnknownNode(_)))
+            .find(|diagnostic| matches!(diagnostic.kind, DiagnosticKind::UnknownNode(_)))
             .unwrap();
         assert_eq!(unknown.kind, DiagnosticKind::UnknownNode("numlok".into()));
         assert_eq!(unknown.place, Some(("b.kdl".into(), 3)));
@@ -198,7 +211,7 @@ Error:   × unexpected node `numlok`
             assert!(
                 diagnostics(text)
                     .iter()
-                    .any(|d| d.kind == DiagnosticKind::UnknownNode("gpas".into())),
+                    .any(|diagnostic| diagnostic.kind == DiagnosticKind::UnknownNode("gpas".into())),
                 "{text}"
             );
         }
@@ -216,10 +229,9 @@ Error:   × unexpected node `numlok`
         assert!(!report.ok);
         let found = diagnostics(&report.diagnostics());
         assert!(
-            found
-                .iter()
-                .any(|d| d.kind == DiagnosticKind::UnknownNode("gapz".into())
-                    && d.place == Some(("config.kdl".into(), 2))),
+            found.iter().any(|diagnostic| diagnostic.kind
+                == DiagnosticKind::UnknownNode("gapz".into())
+                && diagnostic.place == Some(("config.kdl".into(), 2))),
             "{found:?}"
         );
     }

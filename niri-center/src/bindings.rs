@@ -164,7 +164,7 @@ pub fn actions() -> Vec<ActionInfo> {
             name: action.get_name().to_string(),
             about: action
                 .get_about()
-                .map(|about| about.to_string())
+                .map(std::string::ToString::to_string)
                 .unwrap_or_default(),
             arguments: action
                 .get_arguments()
@@ -197,30 +197,31 @@ pub const CATALOG: &str = include_str!("actions.txt");
 /// each argument is `name/flags`, flags `p` positional, `s` switch,
 /// `r` repeated.
 pub fn catalog_text(actions: &[ActionInfo]) -> String {
-    let mut out = String::new();
-    for action in actions {
-        let arguments: Vec<String> = action
-            .arguments
-            .iter()
-            .map(|argument| {
-                let flag = |on: bool, letter: char| if on { letter } else { '-' };
-                format!(
-                    "{}/{}{}{}",
-                    argument.name,
-                    flag(argument.positional, 'p'),
-                    flag(argument.switch, 's'),
-                    flag(argument.repeated, 'r'),
-                )
-            })
-            .collect();
-        out.push_str(&format!(
-            "{}\t{}\t{}\n",
-            action.name,
-            action.about.replace(['\t', '\n'], " "),
-            arguments.join(" ")
-        ));
-    }
-    out
+    actions.iter().map(catalog_line).collect()
+}
+
+/// One action of [`catalog_text`], with its line break.
+fn catalog_line(action: &ActionInfo) -> String {
+    let arguments: Vec<String> = action
+        .arguments
+        .iter()
+        .map(|argument| {
+            let flag = |on: bool, letter: char| if on { letter } else { '-' };
+            format!(
+                "{}/{}{}{}",
+                argument.name,
+                flag(argument.positional, 'p'),
+                flag(argument.switch, 's'),
+                flag(argument.repeated, 'r'),
+            )
+        })
+        .collect();
+    format!(
+        "{}\t{}\t{}\n",
+        action.name,
+        action.about.replace(['\t', '\n'], " "),
+        arguments.join(" ")
+    )
 }
 
 pub fn parse_catalog(text: &str) -> Vec<ActionInfo> {
@@ -344,7 +345,7 @@ mod tests {
     #[test]
     fn the_catalog_matches_the_linked_niri() {
         let actions = super::actions();
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        let names: Vec<&str> = actions.iter().map(|action| action.name.as_str()).collect();
         // a spread across niri's groups, and nothing duplicated
         for name in [
             "quit",
@@ -360,7 +361,13 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), names.len());
-        let usage = |name: &str| actions.iter().find(|a| a.name == name).unwrap().usage();
+        let usage = |name: &str| {
+            actions
+                .iter()
+                .find(|action| action.name == name)
+                .unwrap()
+                .usage()
+        };
         assert_eq!(usage("spawn"), "\"<command>\" …");
         assert_eq!(usage("quit"), "skip-confirmation=true");
         assert_eq!(usage("focus-workspace"), "<reference>");

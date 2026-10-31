@@ -32,8 +32,8 @@ pub enum Page {
 }
 
 impl std::fmt::Display for Page {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(self.label())
     }
 }
 
@@ -59,9 +59,8 @@ impl Page {
         Self::Source,
     ];
 
-    /// The sidebar: groups under plain headings, in order. Windows,
-    /// Events and the config page are reached through search and `--pane`.
-    pub const SIDEBAR: [(&'static str, &'static [Self]); 5] = [
+    /// The sidebar: groups under plain headings, in order.
+    pub const SIDEBAR: [(&'static str, &'static [Self]); 6] = [
         (
             "Keyboard and mouse",
             &[Self::Keybinds, Self::Input, Self::Cursor, Self::Gestures],
@@ -78,7 +77,8 @@ impl Page {
             ],
         ),
         ("Session", &[Self::Startup, Self::Environment]),
-        ("Your config", &[Self::History, Self::Files]),
+        ("Right now", &[Self::Windows, Self::Events]),
+        ("Your config", &[Self::History, Self::Files, Self::Source]),
     ];
 
     /// Every page in the sidebar, in its order.
@@ -149,7 +149,41 @@ impl Page {
             "config" => "files",
             other => other,
         };
-        Self::ALL.into_iter().find(|p| p.slug() == renamed)
+        Self::ALL.into_iter().find(|page| page.slug() == renamed)
+    }
+
+    /// The page of niri's documentation on what this page edits.
+    // checked by hand against niri-wm.github.io on 2026-10-30: each page
+    // answered 200 and has the anchor named
+    pub const fn docs(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Keybinds => "https://niri-wm.github.io/niri/Configuration:-Key-Bindings.html",
+            Self::Input => "https://niri-wm.github.io/niri/Configuration:-Input.html",
+            Self::Cursor => {
+                "https://niri-wm.github.io/niri/Configuration:-Miscellaneous.html#cursor"
+            }
+            Self::Gestures => "https://niri-wm.github.io/niri/Configuration:-Gestures.html",
+            Self::Displays => "https://niri-wm.github.io/niri/Configuration:-Outputs.html",
+            Self::Screenshots => {
+                "https://niri-wm.github.io/niri/Configuration:-Miscellaneous.html#screenshot-path"
+            }
+            Self::Layout => "https://niri-wm.github.io/niri/Configuration:-Layout.html",
+            Self::Rules => "https://niri-wm.github.io/niri/Configuration:-Window-Rules.html",
+            Self::Workspaces => {
+                "https://niri-wm.github.io/niri/Configuration:-Layout.html#empty-workspace-above-first"
+            }
+            Self::Overview => "https://niri-wm.github.io/niri/Configuration:-Overview.html",
+            Self::Animations => "https://niri-wm.github.io/niri/Configuration:-Animations.html",
+            Self::Startup => {
+                "https://niri-wm.github.io/niri/Configuration:-Miscellaneous.html#spawn-at-startup"
+            }
+            Self::Environment => {
+                "https://niri-wm.github.io/niri/Configuration:-Miscellaneous.html#environment"
+            }
+            Self::Files => "https://niri-wm.github.io/niri/Configuration:-Include.html",
+            Self::Source => "https://niri-wm.github.io/niri/Configuration:-Introduction.html",
+            Self::History | Self::Windows | Self::Events => return None,
+        })
     }
 
     /// Live views that are useful next to other windows.
@@ -230,8 +264,11 @@ impl Page {
     fn settings_blocks(self, store: &Store) -> Vec<&'static str> {
         let mut names = Vec::new();
         for spec in REGISTRY.iter().filter(|spec| spec.page == self) {
-            let name = spec.chain.first().map_or(spec.child, |block| block.name);
-            if !names.contains(&name) && store.setting_line(spec.chain, spec.child).is_some() {
+            let name = spec
+                .chain
+                .first()
+                .map_or(spec.child.as_str(), |block| block.name);
+            if !names.contains(&name) && store.setting_line(spec.chain, &spec.child).is_some() {
                 names.push(name);
             }
         }
@@ -254,8 +291,8 @@ impl Page {
 
 /// A stretch of one config file, by 1-based lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Excerpt<'a> {
-    pub path: &'a Path,
+pub struct Excerpt<'view> {
+    pub path: &'view Path,
     pub first: usize,
     pub last: usize,
 }

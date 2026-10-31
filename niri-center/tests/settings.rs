@@ -1,6 +1,12 @@
 //! The settings engine against niri's documented include semantics (niri
 //! wiki, Configuration: Include): includes are positional, most sections
 //! merge field by field, animation subsections are replaced whole.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "clippy.toml's test allowance covers #[test] functions, not helpers"
+)]
 
 mod common;
 use common::*;
@@ -29,7 +35,7 @@ fn file(store: &Store, name: &str) -> String {
     store
         .included_files()
         .iter()
-        .find(|f| f.path.file_name() == Some(Path::new(name).as_os_str()))
+        .find(|file| file.path.file_name() == Some(Path::new(name).as_os_str()))
         .unwrap()
         .doc
         .to_string()

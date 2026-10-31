@@ -9,30 +9,80 @@ use crate::{El, Message};
 
 /// A canvas drawing kept from frame to frame until what it shows changes:
 /// a redraw for every hover would tessellate it again each time, which the
-/// browser demo's software renderer feels most.
+/// browser demo's software renderer feels most. One drawing per palette,
+/// so a change of theme needs none.
 #[derive(Default)]
 pub struct Kept {
-    cache: canvas::Cache,
-    /// What the kept drawing was made from, hashed.
-    made_from: std::cell::Cell<u64>,
+    dark: canvas::Cache,
+    light: canvas::Cache,
+    high_contrast_dark: canvas::Cache,
+    high_contrast_light: canvas::Cache,
+    /// What the kept drawings were made from, hashed; `None` before the
+    /// first frame.
+    made_from: Option<u64>,
 }
 
 impl Kept {
-    /// The drawing of `what` (anything it depends on besides its size),
-    /// drawn again only when that changed.
+    /// Before each frame, from the program's `update`: forget the drawings
+    /// when `what` (all they show besides the theme and size) changed.
+    pub fn follow(&mut self, event: &canvas::Event, what: impl std::hash::Hash) {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+        let canvas::Event::Window(iced::window::Event::RedrawRequested(_)) = event else {
+            return;
+        };
+        let made_from = BuildHasherDefault::<DefaultHasher>::default().hash_one(what);
+        if self
+            .made_from
+            .replace(made_from)
+            .is_some_and(|before| before != made_from)
+        {
+            for cache in [
+                &self.dark,
+                &self.light,
+                &self.high_contrast_dark,
+                &self.high_contrast_light,
+            ] {
+                cache.clear();
+            }
+        }
+    }
+
+    /// The drawing for `theme`'s palette, drawn again only after
+    /// [`Self::follow`] found a change.
     pub fn draw(
         &self,
         renderer: &Renderer,
+        theme: &Theme,
         size: iced::Size,
-        what: impl std::hash::Hash,
         draw: impl FnOnce(&mut Frame),
     ) -> canvas::Geometry {
-        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
-        let made_from = BuildHasherDefault::<DefaultHasher>::default().hash_one(what);
-        if self.made_from.replace(made_from) != made_from {
-            self.cache.clear();
+        let cache = match palette_of(theme) {
+            crate::theme::Palette::Dark => &self.dark,
+            crate::theme::Palette::Light => &self.light,
+            crate::theme::Palette::HighContrastDark => &self.high_contrast_dark,
+            crate::theme::Palette::HighContrastLight => &self.high_contrast_light,
+        };
+        cache.draw(renderer, size, draw)
+    }
+}
+
+/// The theme color an icon is drawn in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tint {
+    Muted,
+    Text,
+    Success,
+    Error,
+}
+
+impl Tint {
+    fn of(self, colors: &crate::theme::Colors) -> iced::Color {
+        match self {
+            Self::Muted => colors.muted,
+            Self::Text => colors.text,
+            Self::Success => colors.success,
+            Self::Error => colors.error,
         }
-        self.cache.draw(renderer, size, draw)
     }
 }
 
@@ -70,17 +120,29 @@ pub enum Icon {
     Camera,
     Clock,
     File,
+    Folder,
+    /// Open windows, one over another.
+    Windows,
+    /// niri's events as they come: a pulse.
+    Events,
+    /// The config text beside the page: `</>`.
+    Source,
+    /// The help card.
+    Help,
     /// Fold the sidebar to icons, and open it again.
     Sidebar,
     /// Make something new: a rule.
     Add,
-    /// Between the steps of a way back up: `All apps > Firefox`.
+    /// Between the steps of a way back up: `All apps > Firefox`. Also a
+    /// folded section.
     Chevron,
+    /// An open section that folds.
+    ChevronDown,
 }
 
 struct Drawing {
     icon: Icon,
-    color: fn(&crate::theme::Colors) -> iced::Color,
+    tint: Tint,
 }
 
 /// A rectangle on the 16 by 16 grid.
@@ -96,8 +158,8 @@ fn polyline(points: &[(f32, f32)], scale: f32) -> Path {
     Path::new(|path| {
         if let Some(((x, y), rest)) = points.split_first() {
             path.move_to(Point::new(x * scale, y * scale));
-            for (x, y) in rest {
-                path.line_to(Point::new(x * scale, y * scale));
+            for (grid_x, grid_y) in rest {
+                path.line_to(Point::new(grid_x * scale, grid_y * scale));
             }
         }
     })
@@ -245,6 +307,51 @@ impl Drawing {
                 ]),
                 line(&[(9.5, 1.5), (9.5, 4.5), (12.5, 4.5)]),
             ],
+            Icon::Folder => vec![line(&[
+                (1.5, 3.0),
+                (6.0, 3.0),
+                (7.5, 4.5),
+                (14.5, 4.5),
+                (14.5, 13.0),
+                (1.5, 13.0),
+                (1.5, 3.0),
+            ])],
+            Icon::Windows => vec![
+                rect(4.5, 1.5, 10.0, 8.0, scale),
+                line(&[
+                    (4.5, 6.5),
+                    (1.5, 6.5),
+                    (1.5, 14.5),
+                    (11.5, 14.5),
+                    (11.5, 9.5),
+                ]),
+            ],
+            Icon::Events => vec![line(&[
+                (1.0, 8.5),
+                (4.5, 8.5),
+                (6.5, 3.0),
+                (9.5, 13.5),
+                (11.5, 8.5),
+                (15.0, 8.5),
+            ])],
+            Icon::Source => vec![
+                line(&[(5.0, 4.0), (1.5, 8.0), (5.0, 12.0)]),
+                line(&[(11.0, 4.0), (14.5, 8.0), (11.0, 12.0)]),
+                line(&[(9.5, 2.5), (6.5, 13.5)]),
+            ],
+            Icon::Help => vec![
+                Path::circle(Point::new(8.0 * scale, 8.0 * scale), 6.5 * scale),
+                Path::new(|path| {
+                    path.arc(canvas::path::Arc {
+                        center: Point::new(8.0 * scale, 6.25 * scale),
+                        radius: 2.0 * scale,
+                        start_angle: iced::Radians(std::f32::consts::PI),
+                        end_angle: iced::Radians(std::f32::consts::PI * 2.5),
+                    });
+                    path.line_to(Point::new(8.0 * scale, 9.5 * scale));
+                }),
+                line(&[(8.0, 11.75), (8.0, 11.95)]),
+            ],
             Icon::Sidebar => vec![
                 rect(1.5, 2.5, 13.0, 11.0, scale),
                 line(&[(6.0, 2.5), (6.0, 13.5)]),
@@ -254,12 +361,24 @@ impl Drawing {
                 line(&[(3.0, 8.0), (13.0, 8.0)]),
             ],
             Icon::Chevron => vec![line(&[(6.0, 4.0), (10.0, 8.0), (6.0, 12.0)])],
+            Icon::ChevronDown => vec![line(&[(4.0, 6.0), (8.0, 10.0), (12.0, 6.0)])],
         }
     }
 }
 
 impl Program<Message, Theme, Renderer> for Drawing {
     type State = Kept;
+
+    fn update(
+        &self,
+        kept: &mut Kept,
+        event: &canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        kept.follow(event, (self.icon, self.tint));
+        None
+    }
 
     fn draw(
         &self,
@@ -269,9 +388,8 @@ impl Program<Message, Theme, Renderer> for Drawing {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<Renderer>> {
-        let color = (self.color)(crate::theme::colors(theme));
-        let what = (self.icon, color.into_rgba8());
-        vec![kept.draw(renderer, bounds.size(), what, |frame| {
+        let color = self.tint.of(crate::theme::colors(theme));
+        vec![kept.draw(renderer, theme, bounds.size(), |frame| {
             let scale = bounds.width.min(bounds.height) / 16.0;
             let stroke = Stroke::default()
                 .with_width(1.5 * scale.max(1.0))
@@ -286,22 +404,18 @@ impl Program<Message, Theme, Renderer> for Drawing {
 }
 
 /// `icon` drawn `size` pixels square in the muted text color.
-pub fn icon<'a>(icon: Icon, size: f32) -> El<'a> {
-    tinted(icon, size, |c| c.muted)
+pub fn icon<'view>(icon: Icon, size: f32) -> El<'view> {
+    tinted(icon, size, Tint::Muted)
 }
 
 /// `icon` in the text color: a sidebar entry's.
-pub fn strong<'a>(icon: Icon, size: f32) -> El<'a> {
-    tinted(icon, size, |c| c.text)
+pub fn strong<'view>(icon: Icon, size: f32) -> El<'view> {
+    tinted(icon, size, Tint::Text)
 }
 
 /// `icon` in one of the theme's colors.
-pub fn tinted<'a>(
-    icon: Icon,
-    size: f32,
-    color: fn(&crate::theme::Colors) -> iced::Color,
-) -> El<'a> {
-    Canvas::new(Drawing { icon, color })
+pub fn tinted<'view>(icon: Icon, size: f32, tint: Tint) -> El<'view> {
+    Canvas::new(Drawing { icon, tint })
         .width(size)
         .height(size)
         .into()

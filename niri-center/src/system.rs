@@ -18,11 +18,11 @@ pub struct XkbItem {
 }
 
 impl std::fmt::Display for XkbItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.group.is_empty() {
-            write!(f, "{} ({})", self.description, self.code)
+            write!(out, "{} ({})", self.description, self.code)
         } else {
-            write!(f, "{}: {} ({})", self.group, self.description, self.code)
+            write!(out, "{}: {} ({})", self.group, self.description, self.code)
         }
     }
 }
@@ -39,8 +39,8 @@ pub struct InstalledApp {
 }
 
 impl std::fmt::Display for InstalledApp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.name, self.command)
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{} ({})", self.name, self.command)
     }
 }
 
@@ -153,7 +153,7 @@ pub fn parse_xkb_rules(xml: &str) -> (Vec<XkbItem>, Vec<XkbItem>) {
             stack.push(element.to_string());
         }
     }
-    layouts.sort_by(|a, b| a.description.cmp(&b.description));
+    layouts.sort_by(|first, second| first.description.cmp(&second.description));
     (layouts, options)
 }
 
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn layouts_and_options_come_from_the_rules_file() {
         let (layouts, options) = parse_xkb_rules(RULES);
-        let codes: Vec<&str> = layouts.iter().map(|l| l.code.as_str()).collect();
+        let codes: Vec<&str> = layouts.iter().map(|layout| layout.code.as_str()).collect();
         // variants are not layouts
         assert_eq!(codes, ["us", "de"]);
         assert_eq!(layouts[1].to_string(), "German (de)");

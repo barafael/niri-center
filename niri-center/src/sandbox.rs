@@ -17,12 +17,14 @@
 //!
 //! On kernels below ABI v8 only the calling thread (and threads it spawns
 //! later) is restricted; [`SandboxStatus::Active`] reports which case held. The app already serializes all file writes through a tiny
-//! surface (the disk actor, and the preferences), so the allow-list has a single
-//! place to be audited.
+//! surface (the disk actor), so the allow-list has a single place to be
+//! audited.
 //!
 //! This is a *best-effort* security feature: on kernels without Landlock
 //! (or when `NIRI_CENTER_NO_SANDBOX` is set) the app still works, fully
-//! unsandboxed, and reports why via [`apply`]'s status.
+//! unsandboxed, and reports why via [`apply`]'s status. What it allows comes
+//! from the environment once, as [`Allowances`], so tests hand in their own
+//! instead of changing the process's environment.
 
 use std::env;
 use std::path::PathBuf;
@@ -34,7 +36,35 @@ use crate::xdg::Places;
 #[cfg(target_os = "linux")]
 fn ensure_folders(places: &Places) {
     for dir in places.folders() {
-        let _ = std::fs::create_dir_all(&dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            // a folder that cannot be made is left out of the allow-list
+            // (Landlock skips missing paths), and the save that needs it
+            // reports why
+        }
+    }
+}
+
+/// Where the sandbox lets the app write and connect, as the environment
+/// says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Allowances {
+    /// The app's own folders, writable besides the config's.
+    pub places: Option<Places>,
+    /// The only pathname sockets the app may connect to.
+    pub sockets: Vec<PathBuf>,
+}
+
+impl Allowances {
+    /// This session's, read from the environment. `None` when
+    /// `NIRI_CENTER_NO_SANDBOX` asks for no sandbox.
+    pub fn from_environment() -> Option<Self> {
+        if env::var_os("NIRI_CENTER_NO_SANDBOX").is_some() {
+            return None;
+        }
+        Some(Self {
+            places: Places::find(),
+            sockets: connectable_sockets(),
+        })
     }
 }
 
@@ -61,8 +91,8 @@ pub enum Unsupported {
 }
 
 impl std::fmt::Display for Unsupported {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
             Self::NotBuiltIn => "Landlock not built into this kernel",
             Self::NotEnabled => "Landlock compiled but not enabled (LSM ordering)",
             Self::NotLinux => "not Linux",
@@ -168,8 +198,8 @@ pub enum Step {
 }
 
 impl std::fmt::Display for Step {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
             Self::HandleAccess => "handle_access",
             Self::CreateRuleset => "create ruleset",
             Self::AddReadRules => "add read rules",
@@ -181,27 +211,29 @@ impl std::fmt::Display for Step {
     }
 }
 
-/// Apply the filesystem sandbox.
+/// Apply the filesystem sandbox, or none without `allowances`.
 ///
 /// `config_dirs` are where saves write (the config directory and, for a
 /// symlinked config, its resolved directory); they and the app's own folders become
 /// the only writable places.
 #[cfg(target_os = "linux")]
-pub fn apply(config_dirs: &[PathBuf]) -> Result<SandboxStatus, SandboxError> {
+pub fn apply(
+    config_dirs: &[PathBuf],
+    allowances: Option<&Allowances>,
+) -> Result<SandboxStatus, SandboxError> {
     use landlock::{
         ABI, Access, AccessFs, CompatLevel, Compatible, LandlockStatus, RestrictSelfAttr, Ruleset,
         RulesetAttr, RulesetCreatedAttr, path_beneath_rules,
     };
 
-    if env::var_os("NIRI_CENTER_NO_SANDBOX").is_some() {
+    let Some(allowances) = allowances else {
         return Ok(SandboxStatus::OptedOut);
-    }
+    };
 
-    let places = Places::find();
-    if let Some(places) = &places {
+    if let Some(places) = &allowances.places {
         ensure_folders(places);
     }
-    let writable = writable_roots(config_dirs, places.as_ref());
+    let writable = writable_roots(config_dirs, allowances.places.as_ref());
 
     // Best-effort: kernels with a lower ABI simply drop the newer rights,
     // and an entirely absent Landlock LSM yields a status we can inspect.
@@ -227,7 +259,7 @@ pub fn apply(config_dirs: &[PathBuf]) -> Result<SandboxStatus, SandboxError> {
         .map_err(failed(Step::AddWriteRules))?
         // missing sockets are skipped; below ABI v9 connects are unrestricted
         .add_rules(path_beneath_rules(
-            connectable_sockets(),
+            allowances.sockets.iter(),
             AccessFs::ResolveUnix,
         ))
         .map_err(failed(Step::AddSocketRules))?
@@ -251,8 +283,13 @@ pub fn apply(config_dirs: &[PathBuf]) -> Result<SandboxStatus, SandboxError> {
 /// Non-Linux fallback (the project targets Linux; the browser demo builds
 /// this one).
 #[cfg(not(target_os = "linux"))]
-pub fn apply(_config_dirs: &[PathBuf]) -> Result<SandboxStatus, SandboxError> {
-    Ok(SandboxStatus::Unsupported(Unsupported::NotLinux))
+pub fn apply(
+    _config_dirs: &[PathBuf],
+    allowances: Option<&Allowances>,
+) -> Result<SandboxStatus, SandboxError> {
+    Ok(allowances.map_or(SandboxStatus::OptedOut, |_| {
+        SandboxStatus::Unsupported(Unsupported::NotLinux)
+    }))
 }
 
 #[cfg(test)]
@@ -260,15 +297,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opt_out_env_is_honored_without_touching_the_kernel() {
-        unsafe {
-            std::env::set_var("NIRI_CENTER_NO_SANDBOX", "1");
-        }
-        let status = apply(&[PathBuf::from("/tmp")]).unwrap();
+    fn opting_out_never_touches_the_kernel() {
+        let status = apply(&[PathBuf::from("/tmp")], None).unwrap();
         assert_eq!(status, SandboxStatus::OptedOut);
-        unsafe {
-            std::env::remove_var("NIRI_CENTER_NO_SANDBOX");
-        }
     }
 
     #[test]
@@ -278,12 +309,14 @@ mod tests {
         assert!(
             roots
                 .iter()
-                .any(|r| r == std::path::Path::new("/tmp/niri-config-tests"))
+                .any(|root| root == std::path::Path::new("/tmp/niri-config-tests"))
         );
         for folder in places.map(|places| places.folders()).unwrap_or_default() {
             assert!(
                 folder.ends_with("niri-center")
-                    || folder.parent().is_some_and(|p| p.ends_with("niri-center"))
+                    || folder
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with("niri-center"))
             );
             assert!(roots.contains(&folder));
         }

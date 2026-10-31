@@ -19,9 +19,9 @@ fn edits_apply_and_only_touch_the_target() {
     // change scale of eDP-1 (argument 0 of its scale child)
     doc.edit_arg(
         &[
-            PathSeg::Name("output"),
+            PathSeg::Name("output".to_string()),
             PathSeg::Index(1),
-            PathSeg::Name("scale"),
+            PathSeg::Name("scale".to_string()),
         ],
         0,
         "1.6",
@@ -31,9 +31,9 @@ fn edits_apply_and_only_touch_the_target() {
     // change position.x of DP-1
     doc.edit_prop(
         &[
-            PathSeg::Name("output"),
+            PathSeg::Name("output".to_string()),
             PathSeg::Index(0),
-            PathSeg::Name("position"),
+            PathSeg::Name("position".to_string()),
         ],
         "x",
         "3200",
@@ -73,9 +73,9 @@ fn edits_apply_and_only_touch_the_target() {
     let new: Vec<&str> = out.lines().collect();
     assert_eq!(orig.len(), new.len());
     let mut changed: Vec<(usize, &str, &str)> = vec![];
-    for (i, (a, b)) in orig.iter().zip(&new).enumerate() {
-        if a != b {
-            changed.push((i, a, b));
+    for (index, (was, b)) in orig.iter().zip(&new).enumerate() {
+        if was != b {
+            changed.push((index, was, b));
         }
     }
     assert_eq!(
@@ -110,5 +110,8 @@ fn config_view_extracts_outputs_and_backdrop_rule() {
     assert_eq!(names, vec!["DP-1", "eDP-1"]);
     assert!(config.has_backdrop_layer_rule());
     let dp1 = config.output(0).unwrap();
-    assert_eq!(dp1.args.first().map(|v| v.kind.as_str()), Some("DP-1"));
+    assert_eq!(
+        dp1.args.first().map(|value| value.kind.as_str()),
+        Some("DP-1")
+    );
 }

@@ -1,7 +1,14 @@
 //! Config store behavior: binding/autostart edits, include resolution, save.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "clippy.toml's test allowance covers #[test] functions, not helpers"
+)]
 
 mod common;
 use common::*;
+use niri_center::animations::Spring;
 use std::fs;
 
 use niri_center::store::{Block, Store};
@@ -29,7 +36,7 @@ fn add_binding_splices_a_valid_new_node() {
     let reparse = niri_center::kdl::parse_document(&out).unwrap();
 
     let rows = store.binding_rows();
-    let keys: Vec<String> = rows.iter().map(|r| r.key.clone()).collect();
+    let keys: Vec<String> = rows.iter().map(|row| row.key.clone()).collect();
     assert_eq!(
         keys,
         vec![
@@ -41,7 +48,8 @@ fn add_binding_splices_a_valid_new_node() {
         ]
     );
     assert_eq!(
-        rows.last().map(|r| (r.key.as_str(), r.action.as_str())),
+        rows.last()
+            .map(|row| (row.key.as_str(), row.action.as_str())),
         Some(("Mod+Shift+W", "spawn-sh awww -c"))
     );
     assert!(
@@ -93,7 +101,11 @@ fn remove_binding_deletes_exactly_its_line() {
 
     let out = store.document().to_string();
     assert!(!out.contains("Mod+Space"));
-    let keys: Vec<String> = store.binding_rows().into_iter().map(|r| r.key).collect();
+    let keys: Vec<String> = store
+        .binding_rows()
+        .into_iter()
+        .map(|row| row.key)
+        .collect();
     assert_eq!(keys, ["Mod+Shift+Slash", "Mod+Return", "Mod+L"]);
     // the remaining keys and comments untouched
     for needle in [
@@ -133,7 +145,7 @@ fn save_requires_valid_config_and_roundtrips() {
             reloaded.document().to_string(),
             store.document().to_string()
         );
-        assert!(reloaded.binding_rows().iter().any(|r| r.key == "Mod+E"));
+        assert!(reloaded.binding_rows().iter().any(|row| row.key == "Mod+E"));
     } else {
         // niri not on PATH: store must not crash, doc stays well-formed
         assert!(store.document().to_string().contains("Mod+E"));
@@ -353,7 +365,7 @@ fn edits_write_to_the_owning_file() {
         store
             .included_files()
             .iter()
-            .find(|f| f.path.file_name().and_then(|s| s.to_str()) == Some(name))
+            .find(|file| file.path.file_name().and_then(|name| name.to_str()) == Some(name))
             .unwrap()
             .doc
             .to_string()
@@ -434,8 +446,8 @@ fn pending_diffs_reports_only_changed_files() {
     let added = diffs[0]
         .hunks
         .iter()
-        .flat_map(|h| &h.lines)
-        .filter(|l| matches!(l, niri_center::diff::Line::Added(_)))
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| matches!(line, niri_center::diff::Line::Added(_)))
         .count();
     assert!(added >= 1, "expected an added line in the diff");
 }
@@ -470,7 +482,7 @@ fn set_layout_gaps_replaces_value() {
     let layout_doc = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("general.kdl"))
+        .find(|file| file.path.ends_with("general.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -479,7 +491,7 @@ fn set_layout_gaps_replaces_value() {
     let kb = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("keybinds.kdl"))
+        .find(|file| file.path.ends_with("keybinds.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -531,7 +543,7 @@ fn set_center_focused_column_inserts_then_replaces() {
     let general = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("general.kdl"))
+        .find(|file| file.path.ends_with("general.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -568,7 +580,7 @@ fn input_flags_toggle_and_xkb_layout_updates() {
     let general = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("general.kdl"))
+        .find(|file| file.path.ends_with("general.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -578,7 +590,7 @@ fn input_flags_toggle_and_xkb_layout_updates() {
     let kb = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("keybinds.kdl"))
+        .find(|file| file.path.ends_with("keybinds.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -601,7 +613,7 @@ fn stage_backup_replaces_the_staged_content() {
         store
             .pending_files()
             .iter()
-            .any(|f| f.after.contains("Mod+M"))
+            .any(|file| file.after.contains("Mod+M"))
     );
 
     // the backup holds the on-disk content, so staging it undoes the edit
@@ -628,7 +640,7 @@ fn set_output_position_replaces_or_inserts() {
     let general = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("general.kdl"))
+        .find(|file| file.path.ends_with("general.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -641,7 +653,7 @@ fn set_output_position_replaces_or_inserts() {
     let kb = store
         .included_files()
         .iter()
-        .find(|f| f.path.ends_with("keybinds.kdl"))
+        .find(|file| file.path.ends_with("keybinds.kdl"))
         .unwrap()
         .doc
         .to_string();
@@ -725,7 +737,11 @@ fn easing_and_spring_settings_stage_valid_config() {
     );
     assert_eq!(
         store.spring_params("window-movement"),
-        Some((1.0, 800.0, 0.0001))
+        Some(Spring {
+            damping_ratio: 1.0,
+            stiffness: 800.0,
+            epsilon: 0.0001
+        })
     );
 
     // easing: replace the curve value
@@ -738,13 +754,15 @@ fn easing_and_spring_settings_stage_valid_config() {
     );
 
     // spring: replace prop spans
+    let livelier = Spring {
+        damping_ratio: 0.6,
+        stiffness: 1000.0,
+        epsilon: 0.001,
+    };
     store
-        .set_spring_params("window-movement", 0.6, 1000.0, 0.001)
+        .set_spring_params("window-movement", livelier)
         .unwrap();
-    assert_eq!(
-        store.spring_params("window-movement"),
-        Some((0.6, 1000.0, 0.001))
-    );
+    assert_eq!(store.spring_params("window-movement"), Some(livelier));
     let out = store.document().to_string();
     assert!(
         out.contains("spring damping-ratio=0.6 stiffness=1000 epsilon=0.001"),
@@ -768,13 +786,13 @@ fn disable_enable_binding_roundtrip() {
     let original = store
         .binding_rows()
         .iter()
-        .find(|r| r.key == "Mod+Return")
+        .find(|row| row.key == "Mod+Return")
         .map(|_| store.document().to_string())
         .unwrap();
     let index = store
         .binding_rows()
         .iter()
-        .position(|r| r.key == "Mod+Return")
+        .position(|row| row.key == "Mod+Return")
         .unwrap();
 
     // disable: `/-` marker inserted before the name, indent preserved
@@ -796,7 +814,7 @@ fn disable_enable_binding_roundtrip() {
     assert_eq!(store.document().to_string(), original);
     assert!(!store.binding_rows()[index].disabled);
     assert!(store.pending_files().is_empty());
-    let _ = dir;
+    drop(dir);
 }
 
 #[test]
@@ -825,7 +843,7 @@ fn edit_binding_changes_key_and_action_keeps_props() {
     let index = store
         .binding_rows()
         .iter()
-        .position(|r| r.key == "Mod+Return")
+        .position(|row| row.key == "Mod+Return")
         .unwrap();
 
     // key → new combo, spawn → spawn-sh with args; the hotkey-overlay-title
@@ -867,7 +885,7 @@ fn edit_binding_preserves_disable_marker() {
     let index = store
         .binding_rows()
         .iter()
-        .position(|r| r.key == "Mod+L")
+        .position(|row| row.key == "Mod+L")
         .unwrap();
     store.set_binding_disabled(index, true).unwrap();
     store
@@ -1007,7 +1025,11 @@ fn disabled_blocks_are_skipped_for_input_and_animations() {
 fn disabled_binds_block_is_ignored() {
     let source = "/-binds {\n    Mod+A { quit; }\n}\nbinds {\n    Mod+B { quit; }\n}\n";
     let (_dir, mut store) = store_from(source);
-    let keys: Vec<String> = store.binding_rows().into_iter().map(|r| r.key).collect();
+    let keys: Vec<String> = store
+        .binding_rows()
+        .into_iter()
+        .map(|row| row.key)
+        .collect();
     assert_eq!(keys, vec!["Mod+B".to_string()]);
 
     store.add_binding("Mod+C", "quit").unwrap();
@@ -1126,7 +1148,7 @@ fn save_aborts_before_any_write_when_one_file_is_unwritable() {
 fn binding_rows_carry_the_raw_action_text() {
     let (_dir, store) = temp_store();
     let rows = store.binding_rows();
-    let space = rows.iter().find(|r| r.key == "Mod+Space").unwrap();
+    let space = rows.iter().find(|row| row.key == "Mod+Space").unwrap();
     assert_eq!(space.action, "spawn rofi -show drun", "display text");
     assert_eq!(space.action_raw, "spawn \"rofi -show drun\"", "source text");
 }
@@ -1138,7 +1160,7 @@ fn remove_then_restore_is_byte_identical_including_props() {
     let index = store
         .binding_rows()
         .iter()
-        .position(|r| r.key == "Mod+Space")
+        .position(|row| row.key == "Mod+Space")
         .unwrap();
     let removed = store.remove_binding(index).unwrap();
     assert_ne!(store.document().to_string(), before);
@@ -1180,7 +1202,14 @@ fn easing_curve_and_spring_replace_each_other() {
     assert!(!window_open.contains("spring"), "{out}");
 
     store
-        .set_spring_params("workspace-switch", 1.0, 800.0, 0.001)
+        .set_spring_params(
+            "workspace-switch",
+            Spring {
+                damping_ratio: 1.0,
+                stiffness: 800.0,
+                epsilon: 0.001,
+            },
+        )
         .unwrap();
     let out = store.document().to_string();
     let workspace_switch = &out[out.find("workspace-switch").unwrap()..];
@@ -1471,4 +1500,40 @@ fn an_added_binding_or_rule_says_where_it_is() {
         .replace_window_rule(0, "window-rule {\n    open-maximized true\n}")
         .unwrap();
     assert_eq!(edited, 0);
+}
+
+#[test]
+fn the_home_binding_file_is_the_one_most_bindings_are_in() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("config.kdl"),
+        "binds {\n    Mod+P { spawn \"fuzzel\"; }\n}\ninclude \"keys.kdl\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("keys.kdl"),
+        "binds {\n    Mod+T { spawn \"kitty\"; }\n    Mod+Q { close-window; }\n}\n",
+    )
+    .unwrap();
+    let rows = load(dir.path().join("config.kdl")).binding_rows();
+    assert_eq!(
+        niri_center::store::home_binding_file(&rows),
+        Some(("keys.kdl", 1))
+    );
+    assert_eq!(niri_center::store::home_binding_file(&[]), None);
+}
+
+#[test]
+fn the_xkb_block_is_read_as_niri_builds_its_keymap() {
+    let store = Store::from_text(
+        "config.kdl".into(),
+        "input {\n    keyboard {\n        xkb {\n            layout \"de,us\"\n            variant \",dvorak\"\n            options \"ctrl:nocaps\"\n        }\n    }\n}\n",
+    )
+    .unwrap();
+    let xkb = store.xkb();
+    assert_eq!(xkb.layouts, ["de", "us"]);
+    assert_eq!(xkb.variant_of("us"), "dvorak");
+    assert_eq!(xkb.variant_of("de"), "");
+    assert_eq!(xkb.options, "ctrl:nocaps");
+    assert_eq!(xkb.file, None);
 }

@@ -6,6 +6,7 @@ use iced::{Alignment, Length, Task};
 use niri_center::niri;
 use niri_center::outputs::{self, MonitorInfo};
 use niri_center::settings::{self, Coordinate, DraftKey, Edit, OutputSetting};
+use num_traits::ToPrimitive;
 
 use crate::app::{App, error, info, room};
 use crate::controls::{self, small};
@@ -46,12 +47,18 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
             let result = state.session.change_display(false, |store, _| {
                 // edge to edge with the nearest display, even left of 0,0
                 let rects = outputs::staged(&state.outputs, store);
-                let (x, y) =
-                    outputs::snap(&dropped.name, dropped.x as f64, dropped.y as f64, &rects);
+                let Some((x, y)) = outputs::snap(
+                    &dropped.name,
+                    f64::from(dropped.x),
+                    f64::from(dropped.y),
+                    &rects,
+                ) else {
+                    return Ok(());
+                };
                 moved = Some((x, y));
                 store
                     .set_output_position(&dropped.name, x, y)
-                    .map_err(|e| e.to_string())
+                    .map_err(|failure| failure.to_string())
             });
             match (result, moved) {
                 (Ok(()), Some((x, y))) => {
@@ -69,17 +76,17 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                     }
                 }
                 (Ok(()), None) => {}
-                (Err(e), _) => state.status = error(e),
+                (Err(failure), _) => state.status = error(failure),
             }
         }
         Message::Pick(name) => state.displays.selected = Some(name),
         Message::Position(name, coordinate, typed) => {
             // tried once the typing stops and it is saved
             let outputs = &state.outputs;
-            if let Err(e) = state.session.change_display(true, |store, drafts| {
+            if let Err(failure) = state.session.change_display(true, |store, drafts| {
                 outputs::type_position(store, drafts, outputs, &name, coordinate, typed)
             }) {
-                state.status = error(e);
+                state.status = error(failure);
             }
         }
     }
@@ -96,9 +103,9 @@ pub fn page(state: &App) -> El<'_> {
         |store| niri_center::outputs::staged(&state.outputs, store),
     );
     let mut overview = column![].spacing(12).width(Length::Fill);
-    if let Some(e) = &state.displays.error {
+    if let Some(failure) = &state.displays.error {
         overview = overview.push(
-            text(format!("niri did not answer: {e}"))
+            text(format!("niri did not answer: {failure}"))
                 .size(13)
                 .style(theme::error),
         );
@@ -107,12 +114,16 @@ pub fn page(state: &App) -> El<'_> {
         overview = overview.push(text("niri reports no connected displays.").size(13));
     }
     if !rects.is_empty() {
-        overview = overview.push(monitors::monitor_canvas(&rects));
+        overview = overview.push(monitors::monitor_canvas(
+            &rects,
+            width,
+            state.selected_display().map(|output| output.name.as_str()),
+        ));
         let (overlapping, alone) = niri_center::outputs::problems(&rects);
-        for (a, b) in overlapping {
+        for (first, second) in overlapping {
             overview = overview.push(
                 text(format!(
-                    "{a} and {b} overlap. niri moves overlapping displays apart on its own, so drag them edge to edge."
+                    "{first} and {second} overlap. niri moves overlapping displays apart on its own, so drag them edge to edge."
                 ))
                 .size(13)
                 .style(theme::pending),
@@ -194,15 +205,16 @@ pub fn page(state: &App) -> El<'_> {
 
 /// Where a display sits, as two numbers to type: for keyboards, and for
 /// a place the drag cannot reach.
-fn position_row<'a>(
-    state: &'a App,
-    output: &'a niri_center::outputs::OutputInfo,
+fn position_row<'app>(
+    state: &'app App,
+    output: &'app niri_center::outputs::OutputInfo,
     rects: &[(String, niri_center::outputs::MonitorInfo)],
-) -> El<'a> {
-    let (x, y) = rects
+) -> El<'app> {
+    let (position_x, position_y) = rects
         .iter()
         .find(|(name, _)| *name == output.name)
-        .map_or((0, 0), |(_, rect)| (rect.x as i64, rect.y as i64));
+        .and_then(|(_, rect)| Some((rect.x.round().to_i64()?, rect.y.round().to_i64()?)))
+        .unwrap_or((0, 0));
     let field = |coordinate: Coordinate, value: i64| {
         let key = DraftKey::Position(output.name.clone(), coordinate);
         let shown = state
@@ -240,8 +252,14 @@ fn position_row<'a>(
     }
     row![
         label.width(Length::Fill),
-        container(row![field(Coordinate::X, x), field(Coordinate::Y, y)].spacing(6)).width(220),
-        space().width(30),
+        container(
+            row![
+                field(Coordinate::X, position_x),
+                field(Coordinate::Y, position_y)
+            ]
+            .spacing(6)
+        )
+        .width(220),
     ]
     .spacing(8)
     .padding([10, 12])
@@ -250,10 +268,10 @@ fn position_row<'a>(
 }
 
 /// While a display change is on trial: what it is, how long until it goes
-/// back, Keep and Go back.
+/// back, Keep and Go back, on a card that floats over the top of the
+/// window, so the page under it stays where it is.
 pub fn trial(state: &App) -> Option<El<'_>> {
     let trying = state.session.trial.as_ref()?;
-    let fraction = trying.seconds_left as f32 / niri_center::session::TRIAL_SECONDS as f32;
     Some(
         container(
             column![
@@ -262,13 +280,11 @@ pub fn trial(state: &App) -> Option<El<'_>> {
                     trying.what, trying.seconds_left
                 ))
                 .size(14),
-                iced::widget::progress_bar(0.0..=1.0, fraction)
-                    .girth(3)
-                    .style(|theme: &iced::Theme| iced::widget::progress_bar::Style {
-                        background: iced::Background::Color(theme::colors(theme).line),
-                        bar: iced::Background::Color(theme::colors(theme).pending),
-                        border: iced::Border::default(),
-                    }),
+                crate::motion::countdown(
+                    trying.seconds_left,
+                    niri_center::session::TRIAL_SECONDS,
+                    state.motions.notice,
+                ),
                 row![
                     button(text("Keep").size(13))
                         .style(theme::primary)
@@ -276,29 +292,27 @@ pub fn trial(state: &App) -> Option<El<'_>> {
                     button(text("Go back").size(13))
                         .style(theme::secondary)
                         .on_press(AppMessage::EndTrial),
-                    text("Enter keeps, Esc goes back")
-                        .size(12)
-                        .style(theme::muted),
+                    text("Enter or Esc goes back").size(12).style(theme::muted),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
             ]
             .spacing(10),
         )
-        .padding(12)
-        .width(Length::Fill)
-        .style(theme::changed_row)
+        .padding(14)
+        .max_width(560)
+        .style(theme::trial_card)
         .into(),
     )
 }
 
 /// One display's settings, laid out for `width`.
-fn output_rows<'a>(
-    state: &'a App,
-    output: &'a niri_center::outputs::OutputInfo,
+fn output_rows<'app>(
+    state: &'app App,
+    output: &'app niri_center::outputs::OutputInfo,
     rects: &[(String, niri_center::outputs::MonitorInfo)],
     width: f32,
-) -> El<'a> {
+) -> El<'app> {
     let Some(store) = state.store() else {
         return space().into();
     };
@@ -325,7 +339,7 @@ fn output_rows<'a>(
                 .iter()
                 .map(|mode| (mode.value.clone(), mode.choice.clone()))
                 .collect(),
-            store.setting(&chain, "mode"),
+            store.setting(&chain, "mode").as_deref(),
             &preferred.map_or_else(
                 || settings::NIRI_DEFAULT.to_string(),
                 |mode| format!("{} ({})", settings::NIRI_DEFAULT, mode.label),
@@ -350,20 +364,27 @@ fn output_rows<'a>(
             .cloned()
             .or_else(|| current.clone())
             .unwrap_or_default();
+        // unset, niri picks a scale that fits the display: the one it runs
+        let fitted = if current.is_none() {
+            percent(output.scale)
+        } else {
+            "fits the display".to_string()
+        };
+        let default_label = format!("{} ({fitted})", settings::NIRI_DEFAULT);
         row![
             controls::choice_list(
                 niri_center::outputs::SCALES
                     .iter()
                     .map(|scale| {
-                        let percent = scale.parse::<f64>().unwrap_or(1.0) * 100.0;
-                        ((*scale).to_string(), format!("{percent}%"))
+                        let factor = scale.parse::<f64>().unwrap_or(1.0);
+                        ((*scale).to_string(), percent(factor))
                     })
                     .collect(),
-                picked.or_else(|| current.clone()),
-                &format!("{} (fits the display)", settings::NIRI_DEFAULT),
+                picked.as_deref().or(current.as_deref()),
+                &default_label,
                 move |edit| AppMessage::Output(name.clone(), OutputSetting::Scale, edit),
             ),
-            text_input("1.5", &shown)
+            text_input(&niri_center::words::short_number(output.scale), &shown)
                 .on_input(move |input| AppMessage::Output(
                     typed.clone(),
                     OutputSetting::Scale,
@@ -407,11 +428,11 @@ fn output_rows<'a>(
     // and the row says why instead of offering it
     let others_on = settings::others_on(store, &state.outputs, &output.name);
     let is_off = store.is_set(&chain, "off");
-    let (off_control, off_notes): (Option<El<'a>>, Vec<settings::Note>) = if others_on || is_off {
+    let (off_control, off_notes): (Option<El<'app>>, Vec<settings::Note>) = if others_on || is_off {
         (None, Vec::new())
     } else {
         (
-            Some(iced::widget::toggler(false).size(20).into()),
+            Some(crate::motion::switch(false, state.motions.switch).into()),
             vec![settings::Note::info(
                 "This is the only display that is on, so it stays on.",
             )],
@@ -424,4 +445,9 @@ fn output_rows<'a>(
         .spacing(12)
         .width(Length::Fill);
     detail.push(rows::group(String::new(), rows)).into()
+}
+
+/// A scale as people read it: `1.25` is `125%`.
+fn percent(scale: f64) -> String {
+    format!("{}%", niri_center::words::short_number(scale * 100.0))
 }

@@ -80,6 +80,8 @@ pub enum Command {
     Focus(u64),
     /// Have niri start a program, outside this app's sandbox.
     Spawn(Vec<String>),
+    /// Open a web page in the user's browser.
+    OpenLink(String),
     /// Let the user click a window.
     PickWindow,
     /// Let the user click anywhere, for the colour there.
@@ -96,6 +98,8 @@ pub enum Reply {
     Running(Result<Running, String>),
     Focused(Result<(), String>),
     Spawned(Result<(), String>),
+    /// Whether a web page could be opened.
+    Opened(Result<(), String>),
     /// The picked window's app ID and title; `None` when cancelled.
     PickedWindow(Result<Option<(String, String)>, String>),
     PickedColor(Result<Option<[f64; 3]>, String>),
@@ -106,6 +110,9 @@ pub enum Reply {
     /// The config column's own window (`--pane source`), by id.
     SourceWindow(u64),
     WindowClosed(u64),
+    /// The configured keyboard layout niri types with, by its place in
+    /// the config's list.
+    KeyboardLayout(usize),
     /// One event, as a line for the Events page.
     Live {
         kind: EventKind,
@@ -223,13 +230,18 @@ mod native {
                     let replies = replies.clone();
                     tokio::spawn(async move {
                         if let Ok(reply) = tokio::task::spawn_blocking(move || pick(&command)).await
+                            && replies.send(reply).is_err()
                         {
-                            let _ = replies.send(reply);
+                            // nobody to tell once the app has closed
                         }
                     });
                     true
                 }
-                Command::Outputs | Command::Running | Command::Focus(_) | Command::Spawn(_) => {
+                Command::Outputs
+                | Command::Running
+                | Command::Focus(_)
+                | Command::Spawn(_)
+                | Command::OpenLink(_) => {
                     let requests = self.requests.take();
                     let Ok((requests, reply)) = tokio::task::spawn_blocking(move || {
                         let mut requests = requests;
@@ -247,8 +259,8 @@ mod native {
         }
     }
 
-    /// What the app follows in an event: config reloads and its own
-    /// config window.
+    /// What the app follows in an event: config reloads, its own config
+    /// window and the keyboard layout in use.
     fn followed(event: Event) -> Option<Reply> {
         let source = Page::Source.app_id();
         let is_source = |app_id: Option<&String>| app_id.is_some_and(|id| *id == source);
@@ -263,6 +275,10 @@ mod native {
                 .find(|window| is_source(window.app_id.as_ref()))
                 .map(|window| Reply::SourceWindow(window.id)),
             Event::WindowClosed { id } => Some(Reply::WindowClosed(id)),
+            Event::KeyboardLayoutsChanged { keyboard_layouts } => Some(Reply::KeyboardLayout(
+                usize::from(keyboard_layouts.current_idx),
+            )),
+            Event::KeyboardLayoutSwitched { idx } => Some(Reply::KeyboardLayout(usize::from(idx))),
             _ => None,
         }
     }
@@ -272,19 +288,27 @@ mod native {
     fn request(requests: &mut Option<Client>, command: Command) -> Reply {
         let client = match requests.take() {
             Some(client) => Ok(client),
-            None => Client::connect().map_err(|e| e.to_string()),
+            None => Client::connect().map_err(|error| error.to_string()),
         };
         let mut client = match client {
             Ok(client) => client,
-            Err(e) => return failed(&command, e),
+            Err(error) => return failed(&command, error),
         };
         let reply = match command {
             Command::Outputs => Reply::Outputs(outputs_from(&mut client)),
             Command::Running => Reply::Running(running_from(&mut client)),
             Command::Focus(id) => {
-                Reply::Focused(client.focus_window(id).map_err(|e| e.to_string()))
+                Reply::Focused(client.focus_window(id).map_err(|error| error.to_string()))
             }
-            Command::Spawn(argv) => Reply::Spawned(client.spawn(argv).map_err(|e| e.to_string())),
+            Command::Spawn(argv) => {
+                Reply::Spawned(client.spawn(argv).map_err(|error| error.to_string()))
+            }
+            // niri starts the opener, so the browser runs outside the sandbox
+            Command::OpenLink(url) => Reply::Opened(
+                client
+                    .spawn(vec!["xdg-open".to_string(), url])
+                    .map_err(|error| error.to_string()),
+            ),
             Command::PickWindow | Command::PickColor | Command::Watch(_) => {
                 return failed(&command, "not a query".to_string());
             }
@@ -292,12 +316,15 @@ mod native {
         let ok = match &reply {
             Reply::Outputs(result) => result.is_ok(),
             Reply::Running(result) => result.is_ok(),
-            Reply::Focused(result) | Reply::Spawned(result) => result.is_ok(),
+            Reply::Focused(result) | Reply::Spawned(result) | Reply::Opened(result) => {
+                result.is_ok()
+            }
             Reply::PickedWindow(_)
             | Reply::PickedColor(_)
             | Reply::ConfigLoaded { .. }
             | Reply::SourceWindow(_)
             | Reply::WindowClosed(_)
+            | Reply::KeyboardLayout(_)
             | Reply::Live { .. }
             | Reply::LiveError(_) => false,
         };
@@ -314,6 +341,7 @@ mod native {
             Command::Running => Reply::Running(Err(why)),
             Command::Focus(_) => Reply::Focused(Err(why)),
             Command::Spawn(_) => Reply::Spawned(Err(why)),
+            Command::OpenLink(_) => Reply::Opened(Err(why)),
             Command::PickWindow => Reply::PickedWindow(Err(why)),
             Command::PickColor => Reply::PickedColor(Err(why)),
             Command::Watch(_) => Reply::LiveError(why),
@@ -324,25 +352,30 @@ mod native {
     fn pick(command: &Command) -> Reply {
         let mut client = match Client::connect() {
             Ok(client) => client,
-            Err(e) => return failed(command, e.to_string()),
+            Err(error) => return failed(command, error.to_string()),
         };
         if *command == Command::PickColor {
-            return Reply::PickedColor(client.pick_color().map_err(|e| e.to_string()));
+            return Reply::PickedColor(client.pick_color().map_err(|error| error.to_string()));
         }
         Reply::PickedWindow(
             client
                 .pick_window()
                 .map(|picked| {
-                    picked.map(|w| (w.app_id.unwrap_or_default(), w.title.unwrap_or_default()))
+                    picked.map(|window| {
+                        (
+                            window.app_id.unwrap_or_default(),
+                            window.title.unwrap_or_default(),
+                        )
+                    })
                 })
-                .map_err(|e| e.to_string()),
+                .map_err(|error| error.to_string()),
         )
     }
 
     fn outputs_from(client: &mut Client) -> Result<Vec<OutputInfo>, String> {
         let mut found: Vec<OutputInfo> = client
             .outputs()
-            .map_err(|e| e.to_string())?
+            .map_err(|error| error.to_string())?
             .into_values()
             .map(|output| OutputInfo {
                 description: format!("{} {}", output.make, output.model)
@@ -374,7 +407,7 @@ mod native {
                 name: output.name,
             })
             .collect();
-        found.sort_by(|a, b| a.name.cmp(&b.name));
+        found.sort_by(|first, second| first.name.cmp(&second.name));
         Ok(found)
     }
 
@@ -382,21 +415,26 @@ mod native {
         let outputs = outputs_from(client)?;
         let windows = client
             .windows()
-            .map_err(|e| e.to_string())?
+            .map_err(|error| error.to_string())?
             .into_iter()
-            .map(|w| OpenWindow {
-                id: w.id,
-                app_id: w.app_id.unwrap_or_default(),
-                title: w.title.unwrap_or_default(),
-                floating: w.is_floating,
-                focused: w.is_focused,
+            .map(|window| OpenWindow {
+                id: window.id,
+                app_id: window.app_id.unwrap_or_default(),
+                title: window.title.unwrap_or_default(),
+                floating: window.is_floating,
+                focused: window.is_focused,
             })
             .collect();
         let layers = client
             .layers()
-            .map_err(|e| e.to_string())?
+            .map_err(|error| error.to_string())?
             .into_iter()
-            .map(|s| format!("{} on {} ({:?})", s.namespace, s.output, s.layer))
+            .map(|surface| {
+                format!(
+                    "{} on {} ({:?})",
+                    surface.namespace, surface.output, surface.layer
+                )
+            })
             .collect();
         Ok(Running {
             outputs,
@@ -436,6 +474,12 @@ mod in_browser {
                     Command::Running => Reply::Running(Ok(crate::demo::running())),
                     Command::Focus(_) => Reply::Focused(Err(DESKTOP_ONLY.to_string())),
                     Command::Spawn(_) => Reply::Spawned(Err(DESKTOP_ONLY.to_string())),
+                    Command::OpenLink(url) => Reply::Opened(
+                        web_sys::window()
+                            .and_then(|window| window.open_with_url_and_target(&url, "_blank").ok())
+                            .map(|_| ())
+                            .ok_or_else(|| "The browser did not open the page.".to_string()),
+                    ),
                     Command::PickWindow => Reply::PickedWindow(Err(DESKTOP_ONLY.to_string())),
                     Command::PickColor => Reply::PickedColor(Err(DESKTOP_ONLY.to_string())),
                     // the demo's Events page shows its samples

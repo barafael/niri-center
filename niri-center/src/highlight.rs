@@ -21,8 +21,8 @@ pub enum Token {
 }
 
 /// Characters that end a bare word.
-const fn ends_word(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '{' | '}' | '(' | ')' | ';' | '=' | '"')
+const fn ends_word(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '{' | '}' | '(' | ')' | ';' | '=' | '"')
 }
 
 /// The stretches of `line`, in order and covering all of it.
@@ -31,33 +31,37 @@ pub fn tokens(line: &str) -> Vec<(Range<usize>, Token)> {
     // a node name is the first word of a line, or the first after { or ;
     let mut head = true;
     let mut rest = line.char_indices().peekable();
-    while let Some((start, c)) = rest.next() {
+    while let Some((start, character)) = rest.next() {
         let after = &line[start..];
-        let (end, token) = if c.is_whitespace() {
+        let (end, token) = if character.is_whitespace() {
             let end = after
-                .find(|c: char| !c.is_whitespace())
-                .map_or(line.len(), |n| start + n);
+                .find(|character: char| !character.is_whitespace())
+                .map_or(line.len(), |offset| start + offset);
             (end, Token::Plain)
         } else if after.starts_with("//") {
             (line.len(), Token::Comment)
         } else if after.starts_with("/-") {
             (start + 2, Token::Comment)
         } else if let Some(rest) = after.strip_prefix("/*") {
-            let end = rest.find("*/").map_or(line.len(), |n| start + n + 4);
+            let end = rest
+                .find("*/")
+                .map_or(line.len(), |offset| start + offset + 4);
             (end, Token::Comment)
-        } else if c == '"' {
+        } else if character == '"' {
             head = false;
             (start + quoted_length(after), Token::String)
         } else if let Some(length) = raw_string_length(after) {
             head = false;
             (start + length, Token::String)
-        } else if matches!(c, '{' | '}' | ';') {
+        } else if matches!(character, '{' | '}' | ';') {
             head = true;
             (start + 1, Token::Punctuation)
-        } else if matches!(c, '=' | '(' | ')') {
+        } else if matches!(character, '=' | '(' | ')') {
             (start + 1, Token::Punctuation)
         } else {
-            let end = after.find(ends_word).map_or(line.len(), |n| start + n);
+            let end = after
+                .find(ends_word)
+                .map_or(line.len(), |offset| start + offset);
             let word = &line[start..end];
             let token = if line[end..].starts_with('=') {
                 Token::Property
@@ -72,7 +76,7 @@ pub fn tokens(line: &str) -> Vec<(Range<usize>, Token)> {
                 Token::Plain
             };
             head = false;
-            (end.max(start + c.len_utf8()), token)
+            (end.max(start + character.len_utf8()), token)
         };
         out.push((start..end, token));
         while rest.peek().is_some_and(|(next, _)| *next < end) {
@@ -86,8 +90,8 @@ pub fn tokens(line: &str) -> Vec<(Range<usize>, Token)> {
 /// unclosed one runs to the end of the line.
 fn quoted_length(text: &str) -> usize {
     let mut escaped = false;
-    for (index, c) in text.char_indices().skip(1) {
-        match c {
+    for (index, character) in text.char_indices().skip(1) {
+        match character {
             '\\' if !escaped => escaped = true,
             '"' if !escaped => return index + 1,
             _ => escaped = false,
@@ -99,7 +103,10 @@ fn quoted_length(text: &str) -> usize {
 /// Length of a raw string such as `r#"…"#` at the start of `text`.
 fn raw_string_length(text: &str) -> Option<usize> {
     let body = text.strip_prefix('r').or_else(|| text.strip_prefix('#'))?;
-    let hashes = body.chars().take_while(|c| *c == '#').count();
+    let hashes = body
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
     let leading = text.len() - body.len() + hashes;
     if !text[leading..].starts_with('"') {
         return None;
@@ -112,13 +119,13 @@ fn raw_string_length(text: &str) -> Option<usize> {
     Some(
         text[opened..]
             .find(&closing)
-            .map_or(text.len(), |n| opened + n + closing.len()),
+            .map_or(text.len(), |offset| opened + offset + closing.len()),
     )
 }
 
 fn is_number(word: &str) -> bool {
     let digits = word.strip_prefix(['-', '+']).unwrap_or(word);
-    digits.starts_with(|c: char| c.is_ascii_digit())
+    digits.starts_with(|character: char| character.is_ascii_digit())
 }
 
 #[cfg(test)]

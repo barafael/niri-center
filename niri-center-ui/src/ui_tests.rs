@@ -146,14 +146,32 @@ fn ui(app: &App, size: Size) -> Simulator<'_, Message> {
     Simulator::with_size(crate::settings(), size, view(app))
 }
 
+/// [`ui`] with what moves already at rest: a first frame long ago, so the
+/// snapshot's own frame finds every movement over.
+fn at_rest(app: &App, size: Size) -> Simulator<'_, Message> {
+    let mut ui = ui(app, size);
+    let long_ago = iced::time::Instant::now() - std::time::Duration::from_secs(10);
+    ui.simulate([iced::Event::Window(iced::window::Event::RedrawRequested(
+        long_ago,
+    ))]);
+    ui
+}
+
 /// Run every message a simulated interaction produced through `update`,
 /// then hand the disk actor what the session asked of it and feed its
 /// answers back, until both are quiet.
 fn apply(app: &mut App, messages: impl IntoIterator<Item = Message>) {
     for message in messages {
-        let _ = step(app, message);
+        run(app, message);
         settle(app);
     }
+}
+
+/// One message through `update`, as [`apply`] does but without settling the
+/// disk actor. The task it returns does IPC or waits on a timer, which the
+/// headless tests never run.
+fn run(app: &mut App, message: Message) {
+    drop(step(app, message));
 }
 
 /// The disk actor's work, done now: commands in, replies back as messages.
@@ -171,7 +189,7 @@ fn settle(app: &mut App) {
             .flat_map(|command| actor.handle(command))
             .collect();
         for reply in replies {
-            let _ = step(app, Message::Disk(Box::new(reply)));
+            run(app, Message::Disk(reply));
         }
     }
 }
@@ -260,9 +278,9 @@ fn status_text(app: &App) -> String {
 fn assert_niri_accepts(app: &App) {
     let probes = tempfile::tempdir().unwrap();
     if niri_center::validate::niri_available()
-        && let Err(e) = Disk::files(Folders::under(probes.path())).check(&store(app).job())
+        && let Err(failure) = Disk::files(Folders::under(probes.path())).check(&store(app).job())
     {
-        panic!("niri rejects:\n{e}\n{}", document(app));
+        panic!("niri rejects:\n{failure}\n{}", document(app));
     }
 }
 
@@ -276,7 +294,8 @@ fn clear_shots(out: &std::path::Path) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.ends_with("-tiny-skia.png") || name.ends_with("-wgpu.png") {
-            let _ = std::fs::remove_file(entry.path());
+            // a stale shot would pass for a current one
+            std::fs::remove_file(entry.path()).unwrap();
         }
     }
 }
@@ -305,8 +324,8 @@ fn render_screens_for_review() -> Result<(), Error> {
             app.window_width = size.width;
             for page in Page::ALL {
                 goto(&mut app, page);
-                let shot = ui(&app, *size).snapshot(&theme)?;
-                let _ = shot.matches_image(
+                let shot = at_rest(&app, *size).snapshot(&theme)?;
+                shot.matches_image(
                     out.join(format!("{mode_name}-{size_name}-{}.png", page.slug())),
                 )?;
             }
@@ -321,17 +340,15 @@ fn render_screens_for_review() -> Result<(), Error> {
         let theme = theme::for_mode(Some(mode), true);
         for page in [Page::Keybinds, Page::Layout, Page::Windows] {
             goto(&mut app, page);
-            let shot = ui(&app, WIDE).snapshot(&theme)?;
-            let _ = shot.matches_image(
-                out.join(format!("{mode_name}-contrast-wide-{}.png", page.slug())),
-            )?;
+            let shot = at_rest(&app, WIDE).snapshot(&theme)?;
+            shot.matches_image(out.join(format!("{mode_name}-contrast-wide-{}.png", page.slug())))?;
         }
     }
     app.mode = Some(iced::theme::Mode::Dark);
     app.window_width = WIDE.width;
     let theme = theme::for_mode(app.mode, false);
     let shoot = |app: &App, name: &str| -> Result<(), Error> {
-        let _ = ui(app, WIDE)
+        at_rest(app, WIDE)
             .snapshot(&theme)?
             .matches_image(out.join(format!("dark-wide-{name}.png")))?;
         Ok(())
@@ -436,11 +453,11 @@ fn render_screens_for_review() -> Result<(), Error> {
     // a third of the screen: an app's card, then one of its rules, alone
     app.window_width = THIRD.width;
     app.window_height = THIRD.height;
-    let _ = ui(&app, THIRD)
+    at_rest(&app, THIRD)
         .snapshot(&theme)?
         .matches_image(out.join("dark-third-rules-app.png"))?;
     apply(&mut app, [Message::Rules(rules::Message::Open(0))]);
-    let _ = ui(&app, THIRD)
+    at_rest(&app, THIRD)
         .snapshot(&theme)?
         .matches_image(out.join("dark-third-rules-rule.png"))?;
     apply(&mut app, [Message::Rules(rules::Message::Show(None))]);
@@ -457,6 +474,17 @@ fn render_screens_for_review() -> Result<(), Error> {
         )],
     );
     shoot(&app, "displays-trying")?;
+    // the trial's card on its way in, as niri's config notification comes:
+    // frames this long after its first one
+    for ms in [0_u64, 40, 80, 120, 200, 400] {
+        let mut ui = ui(&app, WIDE);
+        let first = iced::time::Instant::now() - std::time::Duration::from_millis(ms);
+        ui.simulate([iced::Event::Window(iced::window::Event::RedrawRequested(
+            first,
+        ))]);
+        ui.snapshot(&theme)?
+            .matches_image(out.join(format!("dark-wide-trial-at-{ms:03}ms.png")))?;
+    }
     apply(&mut app, [Message::KeepTrial]);
     // the rule library
     apply(
@@ -489,7 +517,6 @@ fn render_screens_for_review() -> Result<(), Error> {
         .setting_line(&[niri_center::store::Block::named("layout")], "gaps")
         .map(|(_, line)| line)
         .unwrap();
-    let _ = store(&app).text_of(&path);
     app.session
         .store
         .as_mut()
@@ -547,12 +574,12 @@ fn render_screens_for_review() -> Result<(), Error> {
     goto(&mut app, Page::History);
     shoot(&app, "history-saved")?;
     app.window_width = THIRD.width;
-    let _ = ui(&app, THIRD)
+    at_rest(&app, THIRD)
         .snapshot(&theme)?
         .matches_image(out.join("dark-third-history-list.png"))?;
     // half a 1920 px screen: the sidebar folded to icons
     app.window_width = NARROW.width;
-    let _ = ui(&app, NARROW)
+    at_rest(&app, NARROW)
         .snapshot(&theme)?
         .matches_image(out.join("dark-narrow-sidebar-folded.png"))?;
     Ok(())
@@ -575,7 +602,7 @@ fn render_whole_pages_for_review() -> Result<(), Error> {
             let height = if page == Page::Layout { 4000.0 } else { 2400.0 };
             app.window_height = height;
             goto(&mut app, page);
-            let _ = ui(&app, Size::new(width, height))
+            at_rest(&app, Size::new(width, height))
                 .snapshot(&theme)?
                 .matches_image(out.join(format!("{name}-{}.png", page.slug())))?;
         }
@@ -750,7 +777,7 @@ fn every_registry_setting_stages_a_value_niri_accepts() {
     for &setting in Setting::ALL {
         let spec = setting.spec();
         spec.write(app.session.store.as_mut().unwrap(), &spec.sample())
-            .unwrap_or_else(|e| panic!("{setting:?}: {e}"));
+            .unwrap_or_else(|failure| panic!("{setting:?}: {failure}"));
         assert_eq!(
             spec.read(store(&app)),
             spec.sample(),
@@ -774,13 +801,13 @@ fn every_display_setting_stages_a_value_niri_accepts() {
         niri_center::settings::write(
             app.session.store.as_mut().unwrap(),
             &chain,
-            spec.child,
+            &spec.child,
             spec.kind,
             &sample,
         )
-        .unwrap_or_else(|e| panic!("{setting:?}: {e}"));
+        .unwrap_or_else(|failure| panic!("{setting:?}: {failure}"));
         assert_eq!(
-            niri_center::settings::read(store(&app), &chain, spec.child, spec.kind),
+            niri_center::settings::read(store(&app), &chain, &spec.child, spec.kind),
             sample,
             "{setting:?} reads back"
         );
@@ -832,9 +859,12 @@ fn every_setting_has_a_row() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     for page in Page::ALL.into_iter().filter(|page| page.only_settings()) {
         goto(&mut app, page);
-        for setting in Setting::ALL.iter().filter(|s| s.spec().page == page) {
+        for setting in Setting::ALL
+            .iter()
+            .filter(|candidate| candidate.spec().page == page)
+        {
             assert!(
-                shows(&app, TALL, setting.spec().label),
+                shows(&app, TALL, &setting.spec().label),
                 "{setting:?} on {page:?}"
             );
         }
@@ -925,7 +955,7 @@ fn search_finds_a_setting_and_lands_on_its_row() {
     let entry = app
         .search_index
         .matches("repeat rate")
-        .find(|e| e.setting == Some(Setting::InputKeyboardRepeatRate))
+        .find(|entry| entry.setting == Some(Setting::InputKeyboardRepeatRate))
         .cloned()
         .expect("repeat rate is searchable");
     apply(&mut app, [Message::SearchPick(entry)]);
@@ -1013,23 +1043,37 @@ fn a_display_change_goes_back_unless_kept() {
         app.session
             .trial
             .as_ref()
-            .is_some_and(|t| t.what.starts_with("DP-1 rotation")),
+            .is_some_and(|trial| trial.what.starts_with("DP-1 rotation")),
         "{:?}",
         app.session.trial
     );
     apply(&mut app, [Message::EndTrial]);
-    // kept, it stays
+    // Enter goes back, as Esc does: keeping takes a click, which a black
+    // or garbled screen does not get by reflex
+    let before_enter = document(&app);
     apply(
         &mut app,
         [
             Message::Output(
                 "DP-1".into(),
                 OutputSetting::Transform,
-                Edit::Choice(Some("90".into())),
+                Edit::Choice(Some("270".into())),
             ),
             Message::Shortcut(crate::shortcuts::Shortcut::Confirm),
         ],
     );
+    assert!(app.session.trial.is_none());
+    assert_eq!(document(&app), before_enter, "Enter went back");
+    // kept, it stays
+    apply(
+        &mut app,
+        [Message::Output(
+            "DP-1".into(),
+            OutputSetting::Transform,
+            Edit::Choice(Some("90".into())),
+        )],
+    );
+    click(&mut app, "Keep");
     assert!(app.session.trial.is_none());
     assert!(
         document(&app).contains("transform \"90\""),
@@ -1067,7 +1111,7 @@ fn choosing_an_easing_for_a_spring_animation_replaces_the_spring() {
             Message::Animations(animations::Message::Curve(Curve::EaseOutQuad)),
         ],
     );
-    click(&mut app, "Use this curve");
+    // in the config at once, as every other control
     let out = document(&app);
     let window_open = &out[out.find("window-open").unwrap()..out.find("workspace-switch").unwrap()];
     assert!(
@@ -1107,7 +1151,6 @@ fn an_animation_the_config_leaves_alone_can_take_a_custom_curve() {
             Message::Animations(animations::Message::Duration("300".into())),
         ],
     );
-    click(&mut app, "Use this curve");
     let out = document(&app);
     assert!(
         out.contains("curve \"cubic-bezier\" 0.05 0.7 0.1 1.0"),
@@ -1115,7 +1158,7 @@ fn an_animation_the_config_leaves_alone_can_take_a_custom_curve() {
         status_text(&app)
     );
     assert_niri_accepts(&app);
-    click(&mut app, "Back to niri's default");
+    click(&mut app, "Use niri's default");
     assert!(!document(&app).contains("overview-open-close"));
 }
 
@@ -1604,9 +1647,9 @@ fn the_config_shows_only_when_asked_for() {
         assert!(!app.source_open(), "not by itself at {width}");
     }
     app.window_width = WIDE.width;
-    click(&mut app, "Show config.kdl");
+    click(&mut app, "Config text");
     assert!(app.source_open());
-    click(&mut app, "Hide config.kdl");
+    click(&mut app, "Config text");
     assert!(!app.source_open());
 }
 
@@ -1656,7 +1699,7 @@ fn the_source_shows_only_blocks_that_hold_what_the_page_edits() {
 #[test]
 fn an_edit_is_saved_after_a_pause() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -1664,10 +1707,10 @@ fn an_edit_is_saved_after_a_pause() {
     assert_eq!(app.session.pending(), 1);
     // a message that changes nothing keeps the wait as it is
     let due = app.session.due();
-    let _ = step(&mut app, Message::RunningTick);
+    run(&mut app, Message::RunningTick);
     assert_eq!(app.session.due(), due);
     // a tick before the wait is over saves nothing
-    let _ = step(&mut app, Message::SaveTick);
+    run(&mut app, Message::SaveTick);
     assert_eq!(app.session.pending(), 1);
     app.session.hurry();
     apply(&mut app, [Message::SaveTick]);
@@ -1866,11 +1909,11 @@ fn saving_waits_while_niri_cannot_read_the_config_and_blames_nobody() {
     // found at start, before any change
     apply(
         &mut app,
-        [Message::Disk(Box::new(Reply::Checked(Err(
-            "unexpected node `gpas`".into(),
-        ))))],
+        [Message::Disk(Reply::Checked(Err(
+            "unexpected node `gpas`".into()
+        )))],
     );
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -1904,9 +1947,9 @@ fn an_edit_made_while_a_save_is_written_gets_its_own_save() {
     );
     app.session.hurry();
     // the tick sends the save; the disk actor has not answered yet
-    let _ = step(&mut app, Message::SaveTick);
+    run(&mut app, Message::SaveTick);
     assert!(app.session.saving());
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("22".into())),
     );
@@ -1927,12 +1970,12 @@ fn a_change_niri_turns_down_does_not_hold_back_the_ones_before_it() {
     app.session.platform = Platform::Desktop;
     let path = store(&app).path().to_path_buf();
     // a good change, then a binding niri rejects (a key bound twice)
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
     let key = store(&app).binding_rows()[0].key.clone();
-    let _ = step(
+    run(
         &mut app,
         Message::Environment(environment::Message::NewName(String::new())),
     );
@@ -2027,7 +2070,7 @@ fn a_typed_scale_is_tried_and_a_second_change_joins_the_trial() {
 fn closing_saves_what_waits_and_closes_without_asking() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     let path = store(&app).path().to_path_buf();
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -2051,7 +2094,7 @@ fn closing_with_changes_that_wait_for_save_asks_and_can_save_them() {
             SaveWhen::OnRequest,
         ))],
     );
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -2072,7 +2115,7 @@ fn closing_with_changes_that_wait_for_save_asks_and_can_save_them() {
 fn closing_after_another_program_wrote_the_file_says_so() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     let path = store(&app).path().to_path_buf();
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -2096,11 +2139,11 @@ fn closing_while_niri_cannot_read_the_config_says_what_is_dropped() {
     app.session.platform = Platform::Desktop;
     apply(
         &mut app,
-        [Message::Disk(Box::new(Reply::Checked(Err(
-            "unexpected node `gpas`".into(),
-        ))))],
+        [Message::Disk(Reply::Checked(Err(
+            "unexpected node `gpas`".into()
+        )))],
     );
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -2254,7 +2297,7 @@ fn saving_on_request_waits_for_save_and_shows_the_diff_first() {
             niri_center::session::SaveWhen::OnRequest,
         ))],
     );
-    let _ = step(
+    run(
         &mut app,
         Message::Setting(Setting::LayoutGaps, Edit::Draft("20".into())),
     );
@@ -2282,9 +2325,9 @@ fn a_name_niri_does_not_know_gets_a_one_click_fix() {
         &mut app,
         [
             Message::NiriConfigLoaded(true),
-            Message::Disk(Box::new(Reply::Diagnosed(Err(
+            Message::Disk(Reply::Diagnosed(Err(
                 "Error:   × error loading config\n  ╰─▶ unexpected node `gpas`".into(),
-            )))),
+            ))),
         ],
     );
     assert!(shows(
@@ -2315,9 +2358,9 @@ fn a_failed_reload_in_niri_raises_a_banner_with_the_reason() {
     ));
     apply(
         &mut app,
-        [Message::Disk(Box::new(Reply::Diagnosed(Err(
-            "× expected a value".into(),
-        ))))],
+        [Message::Disk(Reply::Diagnosed(Err(
+            "× expected a value".into()
+        )))],
     );
     assert!(shows(&app, WIDE, "× expected a value"));
     click(&mut app, "Dismiss");
@@ -2358,9 +2401,9 @@ fn a_color_field_takes_every_syntax_niri_reads() {
 fn the_picker_writes_the_color_it_shows() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     goto(&mut app, Page::Layout);
-    let target = Message::Setting(
-        Setting::LayoutBorderActiveColor,
-        Edit::Draft(crate::controls::HOLE.to_string()),
+    let target = crate::controls::Destination::Field(
+        DraftKey::Setting(Setting::LayoutBorderActiveColor),
+        crate::controls::HOLE.to_string(),
     );
     apply(
         &mut app,
@@ -2370,7 +2413,7 @@ fn the_picker_writes_the_color_it_shows() {
                 end: None,
             },
             crate::color::parse("#ffc87f"),
-            Box::new(target),
+            target,
         )],
     );
     assert!(shows(&app, TALL, "Pick from screen"));
@@ -2464,16 +2507,13 @@ fn not_saving_screenshots_writes_null() {
 #[test]
 fn a_chosen_folder_keeps_the_file_name() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
-    let target = Message::Setting(
-        Setting::ScreenshotPath,
-        Edit::Draft(format!("{}/Shot %F.png", crate::controls::HOLE)),
+    let target = crate::controls::Destination::Field(
+        DraftKey::Setting(Setting::ScreenshotPath),
+        format!("{}/Shot %F.png", crate::controls::HOLE),
     );
     apply(
         &mut app,
-        [Message::Browsed(
-            Box::new(target),
-            Ok(Some("~/Shots".into())),
-        )],
+        [Message::Browsed(target, Ok(Some("~/Shots".into())))],
     );
     assert!(document(&app).contains("screenshot-path \"~/Shots/Shot %F.png\""));
 }
@@ -2738,7 +2778,7 @@ fn the_browser_demo_renders_every_page_on_its_own_data() {
     app.displays.monitors = niri_center::outputs::rects(&app.outputs);
     apply(
         &mut app,
-        [Message::SystemLoaded(Box::new(niri_center::demo::system()))],
+        [Message::SystemLoaded(niri_center::demo::system())],
     );
     for page in Page::ALL {
         goto(&mut app, page);
@@ -3016,7 +3056,7 @@ fn ui_copy_has_no_em_dashes_or_decorative_glyphs() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            if let Some(glyph) = line.chars().find(|c| banned.contains(c)) {
+            if let Some(glyph) = line.chars().find(|character| banned.contains(character)) {
                 panic!("{file}:{}: {glyph:?} in {line:?}", number + 1);
             }
         }
@@ -3171,15 +3211,16 @@ fn a_key_bound_again_in_a_later_file_says_which_one_niri_uses() {
         &[("agents.kdl", "binds {\n    Mod+P { spawn \"agent\"; }\n}\n")],
     );
     goto(&mut app, Page::Keybinds);
+    // each says what the other one does
     assert!(shows(
         &app,
         WIDE,
-        "Not used: agents.kdl binds this key later."
+        "Not used: agents.kdl binds this key later, to spawn agent."
     ));
     assert!(shows(
         &app,
         WIDE,
-        "Used instead of the binding in config.kdl."
+        "Used instead of spawn fuzzel in config.kdl."
     ));
     assert!(shows(
         &app,
@@ -3289,7 +3330,9 @@ fn a_rule_that_applies_to_a_window_is_changed_in_a_dialog_and_the_window_stays()
 fn the_search_finds_apps_and_rules_on_window_rules_first() {
     use niri_center::by_app::Who;
     let rules: String = (0..10)
-        .map(|n| format!("window-rule {{\n    match app-id=\"app{n}\"\n    opacity 0.9\n}}\n"))
+        .map(|number| {
+            format!("window-rule {{\n    match app-id=\"app{number}\"\n    opacity 0.9\n}}\n")
+        })
         .collect();
     let (_dir, mut app) = loaded_app(&rules);
     goto(&mut app, Page::Rules);
@@ -3362,4 +3405,415 @@ fn a_rule_that_acts_as_a_window_opens_says_when_it_takes_effect() {
         "{}",
         status_text(&app)
     );
+}
+
+/// How many texts read exactly `label`: a selector that never picks,
+/// counting what it is offered.
+fn count_shown(app: &App, size: Size, label: &str) -> usize {
+    let mut count = 0;
+    if ui(app, size)
+        .find(
+            |candidate: iced_test::selector::Candidate<'_>| -> Option<()> {
+                if let iced_test::selector::Candidate::Text { content, .. } = candidate
+                    && content == label
+                {
+                    count += 1;
+                }
+                None
+            },
+        )
+        .is_err()
+    {
+        // the selector matches nothing on purpose: it counts as it goes
+    }
+    count
+}
+
+#[test]
+fn rows_that_depend_on_an_off_setting_say_so_once() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Layout);
+    // the fixture leaves the border and the shadow off, as niri does
+    assert_eq!(count_shown(&app, TALL, "Only used while Border is on."), 1);
+    assert_eq!(count_shown(&app, TALL, "Only used while Shadow is on."), 1);
+}
+
+#[test]
+fn a_first_section_named_like_its_page_has_no_heading() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    // the sidebar's entry and the page title, no third
+    goto(&mut app, Page::Screenshots);
+    assert_eq!(count_shown(&app, TALL, "Screenshots"), 2);
+    // a later section keeps its heading
+    goto(&mut app, Page::Cursor);
+    assert_eq!(count_shown(&app, TALL, "Cursor"), 3);
+}
+
+#[test]
+fn a_switch_stays_beside_its_label_in_a_third_of_the_screen() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Input);
+    let row_height = |app: &mut App, size: Size| {
+        app.window_width = size.width;
+        let mut ui = ui(app, size);
+        let switch = ui.find("Turn on Num Lock at startup").unwrap().bounds();
+        let next = ui.find("Remember the layout").unwrap().bounds();
+        next.y - switch.y
+    };
+    let desktop = row_height(&mut app, WIDE);
+    let third = row_height(&mut app, THIRD);
+    assert!((third - desktop).abs() < 1.0, "{third} against {desktop}");
+}
+
+#[test]
+fn only_bindings_outside_the_main_bindings_file_name_their_file() {
+    let (_dir, mut app) = loaded_app_with(
+        "binds {\n    Mod+P { spawn \"fuzzel\"; }\n}\ninclude \"keys.kdl\"\n",
+        &[(
+            "keys.kdl",
+            "binds {\n    Mod+T { spawn \"kitty\"; }\n    Mod+Q { close-window; }\n}\n",
+        )],
+    );
+    goto(&mut app, Page::Keybinds);
+    assert!(shows(&app, WIDE, "3 bindings in keys.kdl and 1 other file"));
+    assert_eq!(count_shown(&app, WIDE, "config.kdl"), 1);
+    assert_eq!(count_shown(&app, WIDE, "keys.kdl"), 0);
+}
+
+#[test]
+fn a_page_alone_in_its_window_names_itself_once() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Layout);
+    app.pane = Some(Page::Layout);
+    assert_eq!(count_shown(&app, THIRD, "Layout"), 1);
+}
+
+fn shown_layout(app: &App) -> String {
+    app.keybinds.shown.as_ref().unwrap().layout.clone()
+}
+
+#[test]
+fn the_keyboard_picture_follows_the_layout_niri_types_with() {
+    // the fixture configures "de,us"
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Keybinds);
+    assert_eq!(shown_layout(&app), "de");
+    apply(&mut app, [Message::NiriKeyboardLayout(1)]);
+    assert_eq!(shown_layout(&app), "us");
+    // a pick holds until niri switches again
+    apply(
+        &mut app,
+        [Message::Keybinds(keybinds::Message::Layout("de".into()))],
+    );
+    assert_eq!(shown_layout(&app), "de");
+    apply(&mut app, [Message::NiriKeyboardLayout(1)]);
+    assert_eq!(shown_layout(&app), "us");
+}
+
+#[test]
+fn a_pressed_character_finds_the_key_its_cap_shows() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Keybinds);
+    apply(
+        &mut app,
+        [Message::Keybinds(keybinds::Message::KeyFound("Ü".into()))],
+    );
+    assert_eq!(app.keybinds.key_filter.as_deref(), Some("udiaeresis"));
+}
+
+/// Whether a text reading exactly `label` is on screen, not scrolled away.
+fn visible(ui: &mut Simulator<'_, Message>, label: &str) -> bool {
+    let mut seen = false;
+    if ui
+        .find(
+            |candidate: iced_test::selector::Candidate<'_>| -> Option<()> {
+                if let iced_test::selector::Candidate::Text {
+                    content,
+                    visible_bounds,
+                    ..
+                } = candidate
+                    && content == label
+                    && visible_bounds.is_some()
+                {
+                    seen = true;
+                }
+                None
+            },
+        )
+        .is_err()
+    {
+        // the selector matches nothing on purpose: it looks as it goes
+    }
+    seen
+}
+
+#[test]
+fn the_keyboard_stays_while_the_bindings_scroll_under_it() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Keybinds);
+    app.window_width = THIRD.width;
+    app.window_height = THIRD.height;
+    let mut ui = ui(&app, THIRD);
+    assert!(visible(&mut ui, "All bindings"));
+    ui.point_at(iced::Point::new(THIRD.width / 2.0, THIRD.height - 40.0));
+    ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+        delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: -2000.0 },
+    })]);
+    assert!(!visible(&mut ui, "All bindings"), "the list scrolled");
+    assert!(
+        visible(&mut ui, "Find by pressing keys"),
+        "the keyboard stayed"
+    );
+}
+
+// ---- frame, defaults and help ----
+
+#[test]
+fn a_page_goes_back_to_niri_defaults_as_one_change_that_undo_takes_back() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Layout);
+    let before = document(&app);
+    let changes = app.session.history.len();
+    click(&mut app, "Use niri's defaults for this page");
+    wait_for_save(&mut app);
+    let after = document(&app);
+    assert!(!after.contains("gaps 12"), "{after}");
+    assert!(!after.contains("center-focused-column"), "{after}");
+    // the rest of the config is left alone
+    assert!(after.contains("output \"DP-1\""), "{after}");
+    assert_eq!(app.session.history.len(), changes + 1, "one change");
+    // nothing is set any more, so the button goes
+    assert!(!shows(&app, WIDE, "Use niri's defaults for this page"));
+    click(&mut app, "Undo");
+    assert_eq!(document(&app), before);
+    // a page with nothing set has no button
+    goto(&mut app, Page::Workspaces);
+    assert!(!shows(&app, WIDE, "Use niri's defaults for this page"));
+}
+
+#[test]
+fn undo_sits_in_the_bar_at_the_bottom_and_is_there_on_every_page() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Layout);
+    assert!(!shows(&app, WIDE, "Undo"), "nothing to undo yet");
+    apply(
+        &mut app,
+        [Message::Setting(
+            Setting::LayoutGaps,
+            Edit::Draft("20".into()),
+        )],
+    );
+    wait_for_save(&mut app);
+    for page in [Page::Layout, Page::History, Page::Keybinds] {
+        goto(&mut app, page);
+        for size in [WIDE, THIRD] {
+            let mut ui = ui(&app, size);
+            let undo = ui.find("Undo").expect("Undo shows");
+            let bounds = undo.visible_bounds().expect("on screen");
+            assert!(
+                bounds.y > size.height - 60.0,
+                "{page:?} at {size:?}: Undo at {bounds:?}, not along the bottom"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_config_button_opens_a_window_where_there_is_no_room_beside_the_page() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Layout);
+    app.window_width = WIDE.width;
+    assert!(matches!(
+        crate::view::config_toggle(&app).0,
+        Some(Message::ShowSource(true))
+    ));
+    app.window_width = THIRD.width;
+    assert!(matches!(
+        crate::view::config_toggle(&app).0,
+        Some(Message::PopOut(Page::Source))
+    ));
+    // the key its tooltip names does the same
+    assert!(app.niri.is_none(), "no niri to start a window");
+    run(
+        &mut app,
+        Message::Shortcut(crate::shortcuts::Shortcut::PopOutSource),
+    );
+    assert!(
+        app.source_popped.is_some(),
+        "Ctrl+Shift+N pops the config out"
+    );
+    // a page without a part of its own leaves it unavailable
+    goto(&mut app, Page::History);
+    assert!(crate::view::config_toggle(&app).0.is_none());
+}
+
+#[test]
+fn every_page_has_its_place_in_the_sidebar() {
+    let listed: Vec<Page> = Page::in_sidebar().collect();
+    for page in Page::ALL {
+        assert!(listed.contains(&page), "{page:?} is not in the sidebar");
+    }
+}
+
+#[test]
+fn help_opens_niris_documentation_for_the_page() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Layout);
+    apply(
+        &mut app,
+        [Message::Shortcut(crate::shortcuts::Shortcut::Help)],
+    );
+    assert!(app.help_open);
+    let messages: Vec<Message> = {
+        let mut ui = ui(&app, TALL);
+        ui.click("Open niri's documentation").unwrap();
+        ui.into_messages().collect()
+    };
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, Message::OpenDocs(Page::Layout))),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_bad_variable_name_is_said_under_the_field_and_add_waits() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Environment);
+    let before = document(&app);
+    apply(
+        &mut app,
+        [Message::Environment(environment::Message::NewName(
+            "1BAD".into(),
+        ))],
+    );
+    let problem = niri_center::forms::environment_name_problem("1BAD").unwrap();
+    assert!(shows(&app, WIDE, problem));
+    click(&mut app, "Add");
+    assert_eq!(document(&app), before, "Add waits for a name niri takes");
+    assert!(app.status.is_none(), "no toast far from the field");
+}
+
+#[test]
+fn the_animation_editor_follows_the_config_after_undo() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Animations);
+    apply(
+        &mut app,
+        [Message::Animations(animations::Message::Select(
+            Animation::WindowOpen,
+        ))],
+    );
+    assert!(app.animation.spring, "the fixture gives it a spring");
+    apply(
+        &mut app,
+        [Message::Animations(animations::Message::Spring(false))],
+    );
+    wait_for_save(&mut app);
+    assert!(store(&app).spring_params("window-open").is_none());
+    apply(&mut app, [Message::Undo]);
+    assert!(store(&app).spring_params("window-open").is_some());
+    assert!(app.animation.spring, "the editor shows the spring again");
+}
+
+#[test]
+fn history_keeps_the_version_open_in_view_beside_a_list_that_scrolls() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    for gaps in ["14", "16", "18"] {
+        apply(
+            &mut app,
+            [Message::Setting(
+                Setting::LayoutGaps,
+                Edit::Draft(gaps.into()),
+            )],
+        );
+        wait_for_save(&mut app);
+    }
+    goto(&mut app, Page::History);
+    app.window_width = WIDE.width;
+    app.window_height = WIDE.height;
+    assert!(
+        app.page_scrolls_itself(),
+        "two columns that scroll on their own"
+    );
+    // a narrow window shows one at a time, and the page scrolls
+    app.window_width = NARROW.width;
+    assert!(!app.history_beside_list());
+    assert!(!app.page_scrolls_itself());
+}
+
+#[test]
+fn the_trial_card_sits_over_the_page_not_the_sidebar() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Displays);
+    app.window_width = NARROW.width;
+    app.window_height = NARROW.height;
+    apply(
+        &mut app,
+        [Message::Output(
+            "DP-1".into(),
+            OutputSetting::Transform,
+            Edit::Choice(Some("90".into())),
+        )],
+    );
+    let sidebar = app.sidebar_width();
+    assert!(sidebar > 0.0);
+    let mut ui = ui(&app, NARROW);
+    let keep = ui.find("Keep").unwrap().bounds();
+    // the card's padding is 14: Keep starts at its left edge
+    let card_left = keep.x - 14.0;
+    assert!(
+        card_left > sidebar,
+        "card at {card_left}, sidebar to {sidebar}"
+    );
+}
+
+#[test]
+fn keys_bound_more_than_once_can_be_listed_alone() {
+    let (_dir, mut app) = loaded_app_with(
+        "binds {\n    Mod+P { spawn \"fuzzel\"; }\n    Mod+T { spawn \"kitty\"; }\n}\ninclude \"agents.kdl\"\n",
+        &[("agents.kdl", "binds {\n    Mod+P { spawn \"agent\"; }\n}\n")],
+    );
+    goto(&mut app, Page::Keybinds);
+    assert!(shows(&app, WIDE, "spawn kitty"));
+    click(&mut app, "Show them");
+    assert!(!shows(&app, WIDE, "spawn kitty"), "Mod+T is bound once");
+    assert!(shows(&app, WIDE, "spawn fuzzel"));
+    assert!(shows(&app, WIDE, "spawn agent"));
+    click(&mut app, "Show all");
+    assert!(shows(&app, WIDE, "spawn kitty"));
+}
+
+#[test]
+fn the_config_file_page_shows_every_included_file_and_folds_them() {
+    let (_dir, mut app) = loaded_app_with(
+        "include \"general.kdl\"\ninclude \"keys.kdl\"\n",
+        &[
+            ("general.kdl", "layout {\n    gaps 8\n}\n"),
+            ("keys.kdl", "binds {\n    Mod+T { spawn \"kitty\"; }\n}\n"),
+        ],
+    );
+    goto(&mut app, Page::Source);
+    for file in ["config.kdl", "general.kdl", "keys.kdl"] {
+        assert!(shows(&app, TALL, file), "{file}");
+    }
+    // code lines are colored spans, so count the line numbers instead:
+    // every file has a second line, and only config.kdl has two in all
+    assert_eq!(count_shown(&app, TALL, "2"), 3);
+    click(&mut app, "2 lines");
+    assert_eq!(count_shown(&app, TALL, "2"), 2, "config.kdl folded");
+    assert!(shows(&app, TALL, "keys.kdl"), "the others stay open");
+    // its name above the files jumps to it, open again
+    let messages: Vec<Message> = {
+        let mut ui = ui(&app, TALL);
+        ui.click("config.kdl").unwrap();
+        ui.into_messages().collect()
+    };
+    assert!(
+        matches!(messages.as_slice(), [Message::JumpToFile(0, _)]),
+        "{messages:?}"
+    );
+    apply(&mut app, messages);
+    assert_eq!(count_shown(&app, TALL, "2"), 3);
 }

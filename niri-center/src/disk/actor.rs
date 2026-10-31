@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::{Disk, DiskError, Loaded, SaveJob};
 use crate::history::{self, Entry, FileChange, Source};
+use crate::session::SaveWhen;
 use crate::store::Store;
 use crate::summary::describe;
 
@@ -64,6 +65,8 @@ pub enum Command {
     DeleteSnapshot {
         name: String,
     },
+    /// Keep when edits are saved, for the next start.
+    KeepSaveWhen(SaveWhen),
 }
 
 /// A save: the edits to write, the edits before the latest of them to
@@ -134,7 +137,7 @@ pub enum Reply {
         name: String,
         files: Result<Vec<(String, String)>, String>,
     },
-    /// A snapshot could not be made or deleted.
+    /// A snapshot could not be made or deleted, or a preference kept.
     Failed(String),
 }
 
@@ -176,7 +179,8 @@ impl From<DiskError> for Refusal {
             | DiskError::Validator(_)
             | DiskError::Store(_)
             | DiskError::NoBackup { .. }
-            | DiskError::Snapshot { .. }) => Self::Failed(other.to_string()),
+            | DiskError::Snapshot { .. }
+            | DiskError::Preference { .. }) => Self::Failed(other.to_string()),
         }
     }
 }
@@ -240,7 +244,12 @@ impl Actor {
         match command {
             Command::Start { main } => self.start(&main),
             Command::Save(save) => vec![self.save(save)],
-            Command::Reload { main, saved } => vec![Reply::Reloaded(self.reload(&main, &saved))],
+            Command::Reload { main, saved } => {
+                let (reloaded, unrecorded) = self.reload(&main, &saved).unzip();
+                let mut replies = vec![Reply::Reloaded(reloaded)];
+                replies.extend(unrecorded.flatten().map(Reply::Failed));
+                replies
+            }
             Command::Diagnose { main } => vec![Reply::Diagnosed(self.diagnose(&main))],
             Command::Texts { time, purpose } => vec![Reply::Texts {
                 time,
@@ -254,22 +263,26 @@ impl Actor {
             }],
             Command::Listing => vec![self.listing()],
             Command::Backup { name } => {
-                let text = self.disk.backup(&name).map_err(|e| e.to_string());
+                let text = self.disk.backup(&name).map_err(|error| error.to_string());
                 vec![Reply::Backup { name, text }]
             }
             Command::CreateSnapshot { name, files } => {
                 match self.disk.create_snapshot(&name, files) {
                     Ok(()) => vec![self.listing()],
-                    Err(e) => vec![Reply::Failed(e.to_string()), self.listing()],
+                    Err(error) => vec![Reply::Failed(error.to_string()), self.listing()],
                 }
             }
             Command::Snapshot { name } => {
-                let files = self.disk.snapshot(&name).map_err(|e| e.to_string());
+                let files = self.disk.snapshot(&name).map_err(|error| error.to_string());
                 vec![Reply::Snapshot { name, files }]
             }
             Command::DeleteSnapshot { name } => match self.disk.delete_snapshot(&name) {
                 Ok(()) => vec![self.listing()],
-                Err(e) => vec![Reply::Failed(e.to_string()), self.listing()],
+                Err(error) => vec![Reply::Failed(error.to_string()), self.listing()],
+            },
+            Command::KeepSaveWhen(when) => match self.disk.keep_save_when(when) {
+                Ok(()) => Vec::new(),
+                Err(error) => vec![Reply::Failed(error.to_string())],
             },
         }
     }
@@ -277,23 +290,26 @@ impl Actor {
     fn start(&mut self, main: &Path) -> Vec<Reply> {
         let loaded = match self.disk.load(main) {
             Ok(loaded) => loaded,
-            Err(e) => return vec![Reply::Loaded(Err(e.to_string()))],
+            Err(error) => return vec![Reply::Loaded(Err(error.to_string()))],
         };
         if let Some(dir) = &self.history_dir {
             self.history = history::load(dir);
         }
-        self.catch_up(&loaded.store);
+        let unrecorded = self.catch_up(&loaded.store);
         let checked = self.disk.check_on_disk(main);
-        vec![
+        let mut replies = vec![
             Reply::Loaded(Ok(loaded)),
             Reply::History(self.history.clone()),
             Reply::Checked(checked),
-        ]
+        ];
+        replies.extend(unrecorded.map(Reply::Failed));
+        replies
     }
 
     /// Files that differ from what the history last saw were edited while
-    /// the app was closed: record that, so it can be undone too.
-    fn catch_up(&mut self, store: &Store) {
+    /// the app was closed: record that, so it can be undone too. Says why
+    /// when the history could not keep it.
+    fn catch_up(&mut self, store: &Store) -> Option<String> {
         let mut files = Vec::new();
         for (path, text) in store.saved_texts() {
             // the newest entry that touched the file: only its texts are read
@@ -321,14 +337,18 @@ impl Actor {
             }
         }
         if files.is_empty() {
-            return;
+            return None;
         }
+        // the store as the history last saw it, to say what changed
         let mut before = store.clone();
         for file in &files {
-            let _ = before.stage_file(&file.path, &file.before);
+            if before.stage_file(&file.path, &file.before).is_err() {
+                // a file it no longer includes has nothing to say
+            }
         }
         let summary = describe(&before, store);
-        let _ = self.record(Source::Outside, summary, files);
+        let (_, unrecorded) = self.record(Source::Outside, summary, files);
+        unrecorded
     }
 
     fn save(&mut self, save: Save) -> Reply {
@@ -381,8 +401,8 @@ impl Actor {
         let mut failed = None;
         match &self.history_dir {
             Some(dir) => {
-                if let Err(e) = history::record(dir, &entry, &files) {
-                    failed = Some(e.to_string());
+                if let Err(error) = history::record(dir, &entry, &files) {
+                    failed = Some(error.to_string());
                 }
                 history::prune(dir, history::KEEP);
             }
@@ -434,8 +454,14 @@ impl Actor {
         files
     }
 
-    /// Load what other programs wrote since `saved`, and record it.
-    fn reload(&mut self, main: &Path, saved: &[(PathBuf, String)]) -> Option<(Loaded, Entry)> {
+    /// Load what other programs wrote since `saved`, and record it: the
+    /// config anew with its history entry, and why the history could not
+    /// keep it when it could not.
+    fn reload(
+        &mut self,
+        main: &Path,
+        saved: &[(PathBuf, String)],
+    ) -> Option<((Loaded, Entry), Option<String>)> {
         let changed = self.disk.changed(
             saved
                 .iter()
@@ -455,8 +481,8 @@ impl Actor {
         })
         .ok()?;
         let summary = describe(&old, &fresh.store);
-        let (entry, _) = self.record(Source::Outside, summary, changed);
-        Some((fresh, entry))
+        let (entry, unrecorded) = self.record(Source::Outside, summary, changed);
+        Some(((fresh, entry), unrecorded))
     }
 
     fn diagnose(&self, main: &Path) -> Result<(), String> {

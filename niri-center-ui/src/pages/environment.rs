@@ -1,7 +1,7 @@
 //! The Environment page's own part: the variables niri sets for the
 //! programs it starts.
 
-use iced::widget::{column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Alignment, Length, Task};
 use niri_center::forms;
 use niri_center::settings;
@@ -11,7 +11,7 @@ use super::pad;
 use niri_center::store::Store;
 
 use crate::app::{App, error};
-use crate::controls::{self, small};
+use crate::controls;
 use crate::message::Message as AppMessage;
 use crate::rows;
 use crate::{El, theme};
@@ -38,16 +38,16 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
     match message {
         Message::Value(name, value) => {
             if let Some(store) = &mut state.session.store
-                && let Err(e) = store.set_environment(&name, Some(&value))
+                && let Err(failure) = store.set_environment(&name, Some(&value))
             {
-                state.status = error(e.to_string());
+                state.status = error(failure.to_string());
             }
         }
         Message::Remove(name) => {
             if let Some(store) = &mut state.session.store
-                && let Err(e) = store.remove_environment(&name)
+                && let Err(failure) = store.remove_environment(&name)
             {
-                state.status = error(e.to_string());
+                state.status = error(failure.to_string());
             }
         }
         Message::NewName(name) => state.environment.name = name,
@@ -61,7 +61,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
             if let Some(store) = &mut state.session.store {
                 match store.set_environment(&name, Some(&state.environment.value)) {
                     Ok(()) => state.environment = State::default(),
-                    Err(e) => state.status = error(e.to_string()),
+                    Err(failure) => state.status = error(failure.to_string()),
                 }
             }
         }
@@ -70,7 +70,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
 }
 
 /// The variables niri sets for the programs it starts.
-pub fn view<'a>(state: &'a App, store: &'a Store) -> El<'a> {
+pub fn view<'app>(state: &'app App, store: &'app Store) -> El<'app> {
     let mut rows: Vec<El<'_>> = Vec::new();
     for (name, value) in store.environment() {
         let path = settings::line_link(store, &[Block::named("environment")], &name);
@@ -103,21 +103,41 @@ pub fn view<'a>(state: &'a App, store: &'a Store) -> El<'a> {
         .align_y(Alignment::Center)
         .into()));
     }
-    rows.push(pad(row![
-        text_input("NAME", &state.environment.name)
-            .on_input(|name| AppMessage::Environment(Message::NewName(name)))
-            .font(theme::MONO)
-            .width(Length::FillPortion(2)),
-        text_input("value", &state.environment.value)
-            .on_input(|value| AppMessage::Environment(Message::NewValue(value)))
-            .on_submit(AppMessage::Environment(Message::Add))
-            .font(theme::MONO)
-            .width(Length::FillPortion(3)),
-        small("Add", AppMessage::Environment(Message::Add)),
+    // a name is checked as it is typed, under the field, and Add waits
+    // for one niri takes
+    let name = state.environment.name.trim();
+    let problem = (!name.is_empty())
+        .then(|| forms::environment_name_problem(name))
+        .flatten();
+    let ready = !name.is_empty() && problem.is_none();
+    let mut value = text_input("value", &state.environment.value)
+        .on_input(|value| AppMessage::Environment(Message::NewValue(value)))
+        .font(theme::MONO)
+        .width(Length::FillPortion(3));
+    let mut add = button(text("Add").size(12))
+        .padding([3, 10])
+        .style(theme::secondary);
+    if ready {
+        value = value.on_submit(AppMessage::Environment(Message::Add));
+        add = add.on_press(AppMessage::Environment(Message::Add));
+    }
+    let mut adding = column![
+        row![
+            text_input("NAME", &state.environment.name)
+                .on_input(|name| AppMessage::Environment(Message::NewName(name)))
+                .font(theme::MONO)
+                .width(Length::FillPortion(2)),
+            value,
+            add,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
     ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into()));
+    .spacing(4);
+    if let Some(problem) = problem {
+        adding = adding.push(text(problem).size(12).style(theme::error));
+    }
+    rows.push(pad(adding.into()));
     column![
         text("Environment variables").size(14).font(rows::SEMIBOLD),
         text("niri sets these for every program it starts. Programs that are already running keep what they had.")

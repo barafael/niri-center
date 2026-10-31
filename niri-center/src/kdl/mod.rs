@@ -42,20 +42,26 @@ mod tests {
     fn raw_strings_in_props_and_args() {
         let src = "window-rule {\n    match app-id=r##\"^org\\.wezfurlong\\.wezterm$\"## title=r#\"(?i)^(Password)\"#\n    default-column-width {}\n}\n";
         let doc = parse_document(src).unwrap();
-        let rule = doc.find(&[PathSeg::Name("window-rule")]).unwrap();
-        let m = rule.children.iter().find(|c| c.name == "match").unwrap();
-        assert_eq!(m.props.len(), 2);
+        let rule = doc
+            .find(&[PathSeg::Name("window-rule".to_string())])
+            .unwrap();
+        let matcher = rule
+            .children
+            .iter()
+            .find(|child| child.name == "match")
+            .unwrap();
+        assert_eq!(matcher.props.len(), 2);
         assert_eq!(
-            doc.value_text(&m.props[0].value),
+            doc.value_text(&matcher.props[0].value),
             "^org\\.wezfurlong\\.wezterm$"
         );
         // no escapes were processed in the raw string
-        assert!(!doc.value_text(&m.props[0].value).contains("\\\\"));
+        assert!(!doc.value_text(&matcher.props[0].value).contains("\\\\"));
         // empty block `{}` parses to a block with no children
         let dcw = rule
             .children
             .iter()
-            .find(|c| c.name == "default-column-width")
+            .find(|child| child.name == "default-column-width")
             .unwrap();
         assert!(dcw.children.is_empty());
         assert!(dcw.block.is_some());
@@ -109,7 +115,7 @@ output "HDMI-A-1" {
         assert_eq!(outputs.len(), 2);
 
         let dp1 = doc
-            .find(&[PathSeg::Name("output"), PathSeg::Index(0)])
+            .find(&[PathSeg::Name("output".to_string()), PathSeg::Index(0)])
             .unwrap();
         assert_eq!(dp1.args.len(), 1);
         assert_eq!(dp1.args[0].kind, ValueKind::Quoted("DP-1".into()));
@@ -164,9 +170,9 @@ layer-rule {
         let mut doc = parse_document(src).unwrap();
         doc.edit_prop(
             &[
-                PathSeg::Name("output"),
+                PathSeg::Name("output".to_string()),
                 PathSeg::Index(0),
-                PathSeg::Name("scale"),
+                PathSeg::Name("scale".to_string()),
             ],
             "scale",
             "scale",
@@ -174,9 +180,9 @@ layer-rule {
         .unwrap_err(); // scale is an ARG, not a prop — must fail
         doc.edit_arg(
             &[
-                PathSeg::Name("output"),
+                PathSeg::Name("output".to_string()),
                 PathSeg::Index(0),
-                PathSeg::Name("scale"),
+                PathSeg::Name("scale".to_string()),
             ],
             0,
             "1.5",
@@ -200,7 +206,7 @@ layer-rule {
         let diffs: Vec<_> = orig_lines
             .iter()
             .zip(&out_lines)
-            .filter(|(a, b)| a != b)
+            .filter(|(original, written)| original != written)
             .collect();
         assert_eq!(diffs.len(), 1, "only the scale line should change");
         assert_eq!(*diffs[0].0, "    scale 1.0 /* comment that must survive */");
@@ -211,7 +217,9 @@ layer-rule {
     fn bare_ident_argument_is_an_argument_not_a_child() {
         let src = "hot-corners {\n    off\n}\n";
         let doc = parse_document(src).unwrap();
-        let hot = doc.find(&[PathSeg::Name("hot-corners")]).unwrap();
+        let hot = doc
+            .find(&[PathSeg::Name("hot-corners".to_string())])
+            .unwrap();
         assert_eq!(hot.children.len(), 1);
         assert_eq!(hot.children[0].name, "off");
         assert!(hot.children[0].args.is_empty());
@@ -258,9 +266,13 @@ layer-rule {
         let src = "input {\n    touchpad { tap; natural-scroll; }\n}\n";
         let doc = parse_document(src).unwrap();
         let touchpad = &doc.roots[0].children[0];
-        let names: Vec<&str> = touchpad.children.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = touchpad
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect();
         assert_eq!(names, ["tap", "natural-scroll"]);
-        assert!(touchpad.children.iter().all(|c| c.args.is_empty()));
+        assert!(touchpad.children.iter().all(|child| child.args.is_empty()));
         assert_eq!(doc.to_string(), src);
     }
 
@@ -269,7 +281,11 @@ layer-rule {
         let src = "window-rule { match app-id=\"x\"; open-floating true; }\nMod+T { quit; };\n";
         let doc = parse_document(src).unwrap();
         let rule = &doc.roots[0];
-        let names: Vec<&str> = rule.children.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = rule
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect();
         assert_eq!(names, ["match", "open-floating"]);
         assert_eq!(
             rule.children[1].args[0].kind,

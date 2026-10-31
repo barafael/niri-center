@@ -1,0 +1,6 @@
+# Tests may unwrap, expect and panic (CONTRIBUTING.md, Code rules).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+# An index out of range in a test fails that test, as unwrap does.
+allow-indexing-slicing-in-tests = true

@@ -53,7 +53,7 @@ pub fn meant(name: &str) -> Option<String> {
         spec.chain
             .iter()
             .map(|block| block.name)
-            .chain(std::iter::once(spec.child))
+            .chain(std::iter::once(spec.child.as_str()))
     });
     registry
         .chain(KNOWN.iter().copied())

@@ -184,19 +184,20 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
             }
         }
         Message::FromWindow(app_id, title) => {
-            let _ = update(
+            let shown = update(
                 state,
                 Message::Show(Some(by_app::who(&state.system, &app_id))),
             );
             state.rules.window = windows(state)
                 .iter()
-                .find(|w| w.app_id == app_id && w.title == title)
+                .find(|window| window.app_id == app_id && window.title == title)
                 .cloned();
             state.page = Page::Rules;
+            return shown;
         }
         Message::NewForWindow(app_id, title) => {
-            let _ = update(state, Message::FromWindow(app_id.clone(), title));
-            return update(state, Message::New(Some(app_id)));
+            let from = update(state, Message::FromWindow(app_id.clone(), title));
+            return Task::batch([from, update(state, Message::New(Some(app_id)))]);
         }
         Message::New(app_id) => {
             // titles change (a terminal's shows its folder): the app alone,
@@ -238,7 +239,9 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                     return update(state, Message::FromWindow(app_id, title));
                 }
                 Ok(None) => state.status = info("No window picked."),
-                Err(e) => state.status = error(format!("Could not ask niri for a window: {e}")),
+                Err(failure) => {
+                    state.status = error(format!("Could not ask niri for a window: {failure}"))
+                }
             }
         }
         Message::Add => {
@@ -273,7 +276,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                         done.to_string()
                     });
                 }
-                Err(e) => state.status = error(e),
+                Err(failure) => state.status = error(failure),
             }
         }
         Message::On(index, on) => {
@@ -293,7 +296,10 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
         }
         Message::EditText(index) => {
             state.rules.dialog = false;
-            if let Some(text) = state.store().and_then(|s| s.window_rule_source(index)) {
+            if let Some(text) = state
+                .store()
+                .and_then(|store| store.window_rule_source(index))
+            {
                 state.rules.editor =
                     Some((index, iced::widget::text_editor::Content::with_text(&text)));
             }
@@ -317,7 +323,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                     state.rules.editor = None;
                     state.status = info("Rule updated.");
                 }
-                Err(e) => state.status = error(e.to_string()),
+                Err(failure) => state.status = error(failure.to_string()),
             }
         }
         Message::CancelEdit => {
@@ -356,9 +362,9 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                 &mut state.session.store,
                 niri_center::library::LIBRARY.get(index),
             ) {
-                match store.add_window_rule_text(rule.kdl) {
+                match store.add_window_rule_text(&rule.kdl) {
                     Ok(_) => state.status = info(format!("Added: {}.", rule.name)),
-                    Err(e) => state.status = error(e.to_string()),
+                    Err(failure) => state.status = error(failure.to_string()),
                 }
             }
         }
@@ -400,7 +406,7 @@ pub struct Found {
 /// The apps and rules on this page with every word of `query`: an app by
 /// its name or an app ID, a rule by its name or any of its lines.
 pub fn found(state: &App, query: &str) -> Vec<Found> {
-    let words = niri_center::search::Words::of(query);
+    let words = niri_center::search::Terms::of(query);
     let rules = state.rule_rows();
     let apps = state.app_index().iter().filter_map(|entry| {
         let ids: Vec<&str> = entry.app_ids.iter().map(String::as_str).collect();
@@ -459,8 +465,8 @@ pub fn page(state: &App) -> El<'_> {
 }
 
 /// The config's rules, or the library's: the page shows one at a time.
-fn tabs<'a>(library: bool) -> El<'a> {
-    let tab = |label: &'static str, on: bool, open_library: bool| {
+fn tabs<'view>(library: bool) -> El<'view> {
+    let tab = |label: &'view str, on: bool, open_library: bool| {
         button(text(label).size(13))
             .padding([5, 14])
             .style(theme::history_item(on))
@@ -532,7 +538,7 @@ fn your_rules(state: &App, beside: bool) -> El<'_> {
 
 /// The way back up from the level open: all apps, then the app a rule is
 /// shown under.
-fn crumbs<'a>(app: Option<&Entry>) -> El<'a> {
+fn crumbs<'view>(app: Option<&Entry>) -> El<'view> {
     let link = |label: String, message: Message| {
         button(text(label).size(13))
             .padding(0)
@@ -552,12 +558,12 @@ fn crumbs<'a>(app: Option<&Entry>) -> El<'a> {
 
 /// Every app with windows open or rules, then the rules for every window
 /// and those by title or state: one row each, with how many of each.
-fn index_view<'a>(
-    state: &'a App,
+fn index_view<'app>(
+    state: &'app App,
     index: &[Entry],
     rules: &[niri_center::store::WindowRuleRow],
     shown: Option<&Who>,
-) -> El<'a> {
+) -> El<'app> {
     let mut pick: button::Button<'_, AppMessage> = button(
         text(if state.rules.picking {
             "Waiting for a click"
@@ -572,7 +578,7 @@ fn index_view<'a>(
         pick = pick.on_press(AppMessage::Rules(Message::PickWindow));
     }
     let have = crate::library::in_config(state);
-    let listed: Vec<El<'a>> = index
+    let listed: Vec<El<'app>> = index
         .iter()
         .map(|entry| {
             // one line each: the name, then how much it has
@@ -633,10 +639,10 @@ fn index_view<'a>(
 /// A rule's name and where it is written. Within an app, who it is for
 /// goes without saying, so it says what it does and what else picks its
 /// windows (a title, a state).
-fn rule_heading<'a>(
+fn rule_heading<'view>(
     rule: &niri_center::store::WindowRuleRow,
     within_app: bool,
-) -> Column<'a, AppMessage> {
+) -> Column<'view, AppMessage> {
     let name = text(if within_app {
         niri_center::rules::what(rule)
     } else {
@@ -657,7 +663,7 @@ fn rule_heading<'a>(
 }
 
 /// A rule in a list, to open it.
-fn rule_row<'a>(state: &App, rule: &niri_center::store::WindowRuleRow, at: usize) -> El<'a> {
+fn rule_row<'view>(state: &App, rule: &niri_center::store::WindowRuleRow, at: usize) -> El<'view> {
     button(rule_heading(rule, false))
         .padding([8, 12])
         .width(Length::Fill)
@@ -668,12 +674,12 @@ fn rule_row<'a>(state: &App, rule: &niri_center::store::WindowRuleRow, at: usize
 
 /// A rule on its app's page: its name, its lines, and what can be done to
 /// it, so changing it is one click away.
-fn rule_block<'a>(
-    state: &'a App,
+fn rule_block<'app>(
+    state: &'app App,
     rule: &niri_center::store::WindowRuleRow,
     at: usize,
     within_app: bool,
-) -> El<'a> {
+) -> El<'app> {
     rule_heading(rule, within_app)
         .push(rule_text(state, rule))
         .push(rule_actions(rule, at))
@@ -699,12 +705,12 @@ fn place(rule: &niri_center::store::WindowRuleRow, within_app: bool) -> String {
 /// One app: what it is, its open windows, its rules in the order niri
 /// applies them, the rules from elsewhere that reach its windows, and
 /// what the library suggests for it.
-fn app_card<'a>(
-    state: &'a App,
+fn app_card<'app>(
+    state: &'app App,
     entry: &Entry,
     rules: &[niri_center::store::WindowRuleRow],
     windows: &[OpenWindow],
-) -> El<'a> {
+) -> El<'app> {
     // who a rule is for goes without saying, but for those by title
     let within_app = matches!(entry.who, Who::App(_) | Who::Every);
     let mut heading = column![text(entry.name.clone()).size(20).font(rows::SEMIBOLD)].spacing(2);
@@ -739,7 +745,7 @@ fn app_card<'a>(
         }
         body = body.push(section("Open windows", lines.into()));
     }
-    let listed: Vec<El<'a>> = entry
+    let listed: Vec<El<'app>> = entry
         .rules
         .iter()
         .filter_map(|&at| {
@@ -805,7 +811,7 @@ fn app_card<'a>(
 
 /// The plus that opens the form for a new rule, for `app_id` if given;
 /// `what` names it on hover.
-fn add<'a>(what: String, app_id: Option<String>) -> El<'a> {
+fn add<'view>(what: String, app_id: Option<String>) -> El<'view> {
     controls::icon_button(
         crate::icons::Icon::Add,
         14.0,
@@ -815,7 +821,7 @@ fn add<'a>(what: String, app_id: Option<String>) -> El<'a> {
 }
 
 /// A part of a card: a small heading over its content.
-fn section<'a>(heading: &'static str, content: El<'a>) -> El<'a> {
+fn section<'text>(heading: &'text str, content: El<'text>) -> El<'text> {
     column![text(heading).size(14).font(rows::SEMIBOLD), content]
         .spacing(6)
         .into()
@@ -823,12 +829,12 @@ fn section<'a>(heading: &'static str, content: El<'a>) -> El<'a> {
 
 /// One of the config's rules: its text, what it reaches, and what can be
 /// done with it.
-fn rule_detail<'a>(
-    state: &'a App,
+fn rule_detail<'app>(
+    state: &'app App,
     rule: &niri_center::store::WindowRuleRow,
     index: usize,
     windows: &[niri_center::niri::OpenWindow],
-) -> El<'a> {
+) -> El<'app> {
     let mut body = column![
         text(niri_center::rules::name(rule))
             .size(20)
@@ -845,10 +851,14 @@ fn rule_detail<'a>(
         .map(|window| format!("{} ({})", window.title, window.app_id))
         .collect();
     body = body.push(
-        text(match reached.len() {
-            0 => "It reaches none of the open windows.".to_string(),
-            1 => format!("It reaches 1 open window: {}.", reached[0]),
-            n => format!("It reaches {n} open windows: {}.", reached.join(", ")),
+        text(match reached.as_slice() {
+            [] => "It reaches none of the open windows.".to_string(),
+            [only] => format!("It reaches 1 open window: {only}."),
+            many => format!(
+                "It reaches {} open windows: {}.",
+                many.len(),
+                many.join(", ")
+            ),
         })
         .size(12)
         .style(theme::muted),
@@ -858,7 +868,7 @@ fn rule_detail<'a>(
 }
 
 /// A rule's lines as written, colored.
-fn rule_text<'a>(state: &App, rule: &niri_center::store::WindowRuleRow) -> El<'a> {
+fn rule_text<'view>(state: &App, rule: &niri_center::store::WindowRuleRow) -> El<'view> {
     let lines: Vec<String> = rule
         .criteria
         .iter()
@@ -869,7 +879,7 @@ fn rule_text<'a>(state: &App, rule: &niri_center::store::WindowRuleRow) -> El<'a
 }
 
 /// What can be done to a rule: change it, turn it off or on, remove it.
-fn rule_actions<'a>(rule: &niri_center::store::WindowRuleRow, index: usize) -> El<'a> {
+fn rule_actions<'view>(rule: &niri_center::store::WindowRuleRow, index: usize) -> El<'view> {
     row![
         // the form where it can say all of the rule, else the text
         small("Edit", AppMessage::Rules(Message::Edit(index))),
@@ -894,6 +904,7 @@ fn rule_editor(content: &iced::widget::text_editor::Content) -> El<'_> {
                 .size(13)
                 .height(Length::Shrink),
             row![
+                space().width(Length::Fill),
                 button(text("Save changes").size(13))
                     .style(theme::primary)
                     .on_press(AppMessage::Rules(Message::SaveText)),
@@ -913,9 +924,9 @@ fn rule_editor(content: &iced::widget::text_editor::Content) -> El<'_> {
 struct How(niri_center::store::TextMatch);
 
 impl std::fmt::Display for How {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use niri_center::store::TextMatch;
-        f.write_str(match self.0 {
+        out.write_str(match self.0 {
             TextMatch::Exact => "is exactly",
             TextMatch::Contains => "contains",
             TextMatch::Pattern => "matches pattern",
@@ -929,10 +940,10 @@ const HOWS: [How; 3] = [
     How(niri_center::store::TextMatch::Pattern),
 ];
 
-fn rule_builder<'a>(state: &'a App, windows: &[niri_center::niri::OpenWindow]) -> El<'a> {
+fn rule_builder<'app>(state: &'app App, windows: &[niri_center::niri::OpenWindow]) -> El<'app> {
     let draft = &state.rules.draft;
     // a row of the "which windows" card: a word, then the control
-    let labeled = |label: &'static str, control: El<'a>| -> El<'a> {
+    let labeled = |label: &'app str, control: El<'app>| -> El<'app> {
         pad(row![text(label).size(14).width(64), control]
             .spacing(8)
             .align_y(Alignment::Center)
@@ -940,16 +951,16 @@ fn rule_builder<'a>(state: &'a App, windows: &[niri_center::niri::OpenWindow]) -
     };
     let text_match = |how: niri_center::store::TextMatch,
                       on_how: fn(niri_center::store::TextMatch) -> AppMessage,
-                      value: &'a str,
-                      placeholder: &'static str,
+                      value: &'app str,
+                      placeholder: &'app str,
                       on_input: fn(String) -> AppMessage,
-                      id: &'static str|
-     -> El<'a> {
+                      id: iced::widget::Id|
+     -> El<'app> {
         by_width(move |width| {
             let how =
                 pick_list(HOWS, Some(How(how)), move |picked: How| on_how(picked.0)).width(150);
             let field = text_input(placeholder, value)
-                .id(id)
+                .id(id.clone())
                 .on_input(on_input)
                 .on_submit(AppMessage::Rules(Message::Add))
                 .font(theme::MONO)
@@ -989,7 +1000,7 @@ fn rule_builder<'a>(state: &'a App, windows: &[niri_center::niri::OpenWindow]) -
                     &draft.app,
                     "any app, or for example org.gnome.Calculator",
                     move |value| AppMessage::Rules(Message::App(value)),
-                    APP_INPUT,
+                    iced::widget::Id::new(APP_INPUT),
                 ),
             ),
             labeled(
@@ -1000,7 +1011,7 @@ fn rule_builder<'a>(state: &'a App, windows: &[niri_center::niri::OpenWindow]) -
                     &draft.title,
                     "any title",
                     move |value| AppMessage::Rules(Message::Title(value)),
-                    TITLE_INPUT,
+                    iced::widget::Id::new(TITLE_INPUT),
                 ),
             ),
             labeled("While it", when_line.into()),
@@ -1029,8 +1040,8 @@ fn rule_builder<'a>(state: &'a App, windows: &[niri_center::niri::OpenWindow]) -
         let matchers = [matcher];
         match windows
             .iter()
-            .filter(|w| {
-                niri_center::rules::reach_when_on(&matchers, w)
+            .filter(|window| {
+                niri_center::rules::reach_when_on(&matchers, window)
                     == niri_center::rules::Reach::Reaches
             })
             .count()
@@ -1071,23 +1082,23 @@ fn rule_builder<'a>(state: &'a App, windows: &[niri_center::niri::OpenWindow]) -
                 .into()),
             ],
         ),
-        if draft.editing.is_some() {
-            row![
-                button(text("Save changes").size(13))
-                    .style(theme::primary)
-                    .on_press(AppMessage::Rules(Message::Add)),
-                small("Cancel", AppMessage::Rules(Message::CancelEdit)),
-                text(reaches).size(12).style(theme::muted),
-            ]
-        } else {
-            row![
-                button(text("Add rule").size(13))
-                    .style(theme::primary)
-                    .on_press(AppMessage::Rules(Message::Add)),
-                small("Cancel", AppMessage::Rules(Message::CancelEdit)),
-                text(reaches).size(12).style(theme::muted),
-            ]
-        }
+        row![
+            text(reaches)
+                .size(12)
+                .style(theme::muted)
+                .width(Length::Fill),
+            button(
+                text(if draft.editing.is_some() {
+                    "Save changes"
+                } else {
+                    "Add rule"
+                })
+                .size(13)
+            )
+            .style(theme::primary)
+            .on_press(AppMessage::Rules(Message::Add)),
+            small("Cancel", AppMessage::Rules(Message::CancelEdit)),
+        ]
         .spacing(10)
         .align_y(Alignment::Center),
     ]

@@ -72,7 +72,7 @@ pub enum Problem {
 
 /// Where the edits stand: what the header says, and what closing does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SaveState<'a> {
+pub enum SaveState<'view> {
     /// Every change is saved.
     Saved,
     /// Edits wait for the pause after the latest one, or are being written.
@@ -80,7 +80,7 @@ pub enum SaveState<'a> {
     /// niri cannot read the config on disk, so saving waits until it can.
     WaitingForNiri,
     /// The latest change could not be saved.
-    NotSaved(&'a Problem),
+    NotSaved(&'view Problem),
     /// Edits wait for Save, as the Files page sets it.
     OnRequest { files: usize },
 }
@@ -176,6 +176,9 @@ pub enum SaveWhen {
 }
 
 impl SaveWhen {
+    /// Its key in the preferences file.
+    pub const KEY: &str = "save";
+
     /// The word kept in the preferences file.
     pub const fn word(self) -> &'static str {
         match self {
@@ -719,8 +722,8 @@ impl Session {
             return;
         };
         for (path, text) in files {
-            if let Err(e) = store.stage_file(path, text) {
-                self.error = Some(SessionError::CouldNotGoBack(e));
+            if let Err(error) = store.stage_file(path, text) {
+                self.error = Some(SessionError::CouldNotGoBack(error));
                 return;
             }
         }
@@ -912,6 +915,26 @@ mod tests {
         );
         assert_eq!(session.pending(), 0);
         assert_eq!(session.history.len(), 2);
+    }
+
+    #[test]
+    fn when_to_save_is_kept_by_the_disk_actor() {
+        let (dir, mut session, mut actor) = on_disk("layout {\n    gaps 8\n}\n");
+        session.ask(Command::KeepSaveWhen(SaveWhen::OnRequest));
+        assert!(drain(&mut session, &mut actor).is_empty());
+        let kept = crate::prefs::get(&dir.path().join("preferences"), SaveWhen::KEY);
+        assert_eq!(
+            kept.as_deref().and_then(SaveWhen::read),
+            Some(SaveWhen::OnRequest)
+        );
+        // a folder where the file should be: nothing can be kept, and it says so
+        fs::remove_file(dir.path().join("preferences")).unwrap();
+        fs::create_dir(dir.path().join("preferences")).unwrap();
+        session.ask(Command::KeepSaveWhen(SaveWhen::AfterChange));
+        assert!(matches!(
+            drain(&mut session, &mut actor).as_slice(),
+            [Reply::Failed(_)]
+        ));
     }
 
     #[test]

@@ -27,23 +27,24 @@ impl NiriConfig {
         self.doc
             .find_all("output")
             .iter()
-            .filter_map(|n| n.args.first())
-            .map(|v| self.doc.value_text(v))
+            .filter_map(|node| node.args.first())
+            .map(|value| self.doc.value_text(value))
             .collect()
     }
 
     /// The n-th (0-based) output block, for GUI editing.
     pub fn output(&self, index: usize) -> Option<&crate::kdl::Node> {
         self.doc
-            .find(&[PathSeg::Name("output"), PathSeg::Index(index)])
+            .find(&[PathSeg::Name("output".to_string()), PathSeg::Index(index)])
     }
 
     /// Whether the config contains a `layer-rule` with a backdrop placement
     /// (used by wallpaper tools like awww/swaybg).
     pub fn has_backdrop_layer_rule(&self) -> bool {
-        self.doc
-            .find_all("layer-rule")
-            .iter()
-            .any(|n| n.children.iter().any(|c| c.name == "place-within-backdrop"))
+        self.doc.find_all("layer-rule").iter().any(|node| {
+            node.children
+                .iter()
+                .any(|child| child.name == "place-within-backdrop")
+        })
     }
 }

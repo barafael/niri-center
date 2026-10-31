@@ -1,18 +1,44 @@
 //! Small helpers for the app's words: counts, numbers as people type them,
 //! lists and paths in fields.
 
-/// `n` things in words: "1 rule", "3 rules".
-pub fn count(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {many}")
+/// Text written into the app's tables: words people read (a label, a help
+/// line) or niri's own words (a node name, a default value). Not a set the
+/// code chooses among: those are enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Words(pub &'static str);
+
+impl Words {
+    pub const fn as_str(self) -> &'static str {
+        self.0
     }
 }
 
-/// The word that agrees with `n` things: "DP-1 sets", "DP-1, HDMI-A-1 set".
-pub const fn agree<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
-    if n == 1 { one } else { many }
+impl std::ops::Deref for Words {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Words {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(self.0)
+    }
+}
+
+/// `amount` things in words: "1 rule", "3 rules".
+pub fn count(amount: usize, one: &str, many: &str) -> String {
+    if amount == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{amount} {many}")
+    }
+}
+
+/// The word that agrees with `amount` things: "DP-1 sets", "DP-1, HDMI-A-1 set".
+pub const fn agree<'text>(amount: usize, one: &'text str, many: &'text str) -> &'text str {
+    if amount == 1 { one } else { many }
 }
 
 /// Names in a sentence with the verb that agrees: "DP-1 sets", "DP-1,

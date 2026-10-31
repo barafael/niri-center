@@ -10,7 +10,7 @@ pub mod rules;
 pub mod startup;
 mod windows;
 
-use iced::widget::{Column, Row, column, container, row, text};
+use iced::widget::{Column, Row, column, container, row, space, text};
 use iced::{Alignment, Length};
 use niri_center::page::Page;
 
@@ -61,38 +61,50 @@ pub fn page(state: &App) -> Column<'_, Message> {
         })
 }
 
-/// What the page is, in a title and a sentence, and the button that shows
-/// the config beside it: in the same place on every page.
+/// The page's title, and on a page of settings alone the way back to
+/// niri's defaults for all of them while the config sets any. A page alone
+/// in its window has its title in the header already.
 fn heading(state: &App) -> El<'_> {
-    let mut line = row![
+    let title: El<'_> = if state.pane.is_some() {
+        space().width(Length::Fill).into()
+    } else {
         text(state.page.label())
             .size(22)
             .font(rows::SEMIBOLD)
-            .width(Length::Fill),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
-    if state.shows_source() {
-        let open = state.source_shown;
+            .width(Length::Fill)
+            .into()
+    };
+    let mut line = row![title].spacing(12).align_y(Alignment::Center);
+    let set = state
+        .store()
+        .filter(|_| state.page.only_settings() && state.page != Page::Environment)
+        .map_or(0, |store| {
+            niri_center::settings::set_on(store, state.page).count()
+        });
+    if set > 0 {
         line = line.push(iced::widget::tooltip(
             small(
-                if open {
-                    "Hide config.kdl"
-                } else {
-                    "Show config.kdl"
-                },
-                Message::ShowSource(!open),
+                "Use niri's defaults for this page",
+                Message::PageDefaults(state.page),
             ),
-            controls::tip("Ctrl+."),
+            controls::tip(format!(
+                "Takes {} out of the config. Undo puts {} back.",
+                niri_center::words::count(set, "setting", "settings"),
+                if set == 1 { "it" } else { "them" }
+            )),
             iced::widget::tooltip::Position::Left,
         ));
     }
-    line.into()
+    // one line high either way, so the page does not move when it shows
+    container(line)
+        .height(Length::Fixed(30.0))
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// One choice of a few, side by side in one outlined strip: the chosen one
 /// filled.
-fn segments<'a>(choices: Row<'a, Message>) -> El<'a> {
+fn segments<'view>(choices: Row<'view, Message>) -> El<'view> {
     container(choices)
         .padding(1)
         .clip(true)
@@ -102,8 +114,8 @@ fn segments<'a>(choices: Row<'a, Message>) -> El<'a> {
 
 fn no_config(state: &App) -> El<'_> {
     let mut col = column![text("No config loaded yet.").size(14)].spacing(6);
-    if let Some(e) = &state.load_error {
-        col = col.push(text(e.clone()).size(13).style(theme::error));
+    if let Some(failure) = &state.load_error {
+        col = col.push(text(failure.clone()).size(13).style(theme::error));
     }
     col.into()
 }
@@ -114,7 +126,7 @@ fn pad(content: El<'_>) -> El<'_> {
 }
 
 /// A muted tag such as "Off" or "keybinds.kdl".
-fn tag<'a>(label: impl text::IntoFragment<'a>) -> El<'a> {
+fn tag<'view>(label: impl text::IntoFragment<'view>) -> El<'view> {
     text(label).size(12).style(theme::muted).into()
 }
 

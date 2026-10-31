@@ -195,7 +195,7 @@ impl Client {
     #[allow(clippy::wildcard_enum_match_arm)] // any other Response is an equal protocol error
     pub fn version(&mut self) -> Result<String, IpcError> {
         match self.send(Request::Version)? {
-            Response::Version(v) => Ok(v),
+            Response::Version(version) => Ok(version),
             other => Err(unexpected_response("Version", &other)),
         }
     }
@@ -242,7 +242,7 @@ impl Client {
     #[allow(clippy::wildcard_enum_match_arm)] // any other Response is an equal protocol error
     pub fn pick_color(&mut self) -> Result<Option<[f64; 3]>, IpcError> {
         match self.send(Request::PickColor)? {
-            Response::PickedColor(color) => Ok(color.map(|c| c.rgb)),
+            Response::PickedColor(color) => Ok(color.map(|color| color.rgb)),
             other => Err(unexpected_response("PickColor", &other)),
         }
     }

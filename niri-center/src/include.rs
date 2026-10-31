@@ -77,8 +77,8 @@ fn resolve_from(
     }
     // niri skips `/-include`, so a disabled include is never loaded or edited
     let includes: Vec<&str> = active_named(&doc.roots, "include")
-        .filter_map(|n| n.args.first())
-        .filter_map(|v| match &v.kind {
+        .filter_map(|node| node.args.first())
+        .filter_map(|value| match &value.kind {
             crate::kdl::ValueKind::Quoted(s) if !s.is_empty() => Some(s.as_str()),
             crate::kdl::ValueKind::Quoted(_)
             | crate::kdl::ValueKind::Bare(_)
@@ -96,10 +96,10 @@ fn resolve_from(
             continue;
         }
         let source = match read(&target) {
-            Ok(s) => s,
-            Err(e) => {
+            Ok(text) => text,
+            Err(error) => {
                 warnings.push(format!(
-                    "cannot read include {rel} (requested by {}): {e}",
+                    "cannot read include {rel} (requested by {}): {error}",
                     file_path.display()
                 ));
                 continue;
@@ -115,8 +115,8 @@ fn resolve_from(
                     doc: included_doc,
                 });
             }
-            Err(e) => warnings.push(format!(
-                "parse error in {rel} (requested by {}): {e}",
+            Err(error) => warnings.push(format!(
+                "parse error in {rel} (requested by {}): {error}",
                 file_path.display()
             )),
         }
@@ -134,7 +134,7 @@ pub fn include_path(including_file: &Path, rel: &str) -> PathBuf {
     }
     including_file
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(rel)
 }
@@ -142,9 +142,9 @@ pub fn include_path(including_file: &Path, rel: &str) -> PathBuf {
 /// A path with `.` and `..` worked out, for telling a cycle or a file
 /// included twice. Links are not followed: the depth limit stops a cycle
 /// through one.
-fn normalized(p: &Path) -> PathBuf {
+fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
-    for part in p.components() {
+    for part in path.components() {
         match part {
             Component::CurDir => {}
             Component::ParentDir => {

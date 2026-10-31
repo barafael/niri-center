@@ -1,4 +1,10 @@
 //! Window rules: listed, toggled, removed and added losslessly.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "clippy.toml's test allowance covers #[test] functions, not helpers"
+)]
 
 mod common;
 use common::*;

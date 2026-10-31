@@ -15,25 +15,28 @@ use crate::{El, controls, highlight, theme};
 
 /// Rules the library has for a window's app that the config lacks,
 /// offered beside it, each with Add. `None` when there are none.
-pub fn suggestions<'a>(state: &'a App, app_id: &str) -> Option<El<'a>> {
+pub fn suggestions<'app>(state: &'app App, app_id: &str) -> Option<El<'app>> {
     let found = niri_center::library::missing(in_config(state), app_id);
     let app = LIBRARY.get(*found.first()?)?.app?.name();
     let colors = state.colors();
-    let rows: Vec<El<'a>> = found
+    let rows: Vec<El<'app>> = found
         .into_iter()
-        .map(|index| {
-            let rule = &LIBRARY[index];
-            let action: El<'a> = controls::small(
+        .filter_map(|index| Some((index, LIBRARY.get(index)?)))
+        .map(|(index, rule)| {
+            let action: El<'app> = controls::small(
                 "Add this rule",
                 Message::Rules(rules::Message::AddLibraryRule(index)),
             )
             .into();
             column![
-                row![text(rule.name).size(14).width(Length::Fill), action]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                text(rule.why).size(12).style(theme::muted),
-                highlight::block(rule.kdl, colors, 12.0),
+                row![
+                    text(rule.name.as_str()).size(14).width(Length::Fill),
+                    action
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                text(rule.why.as_str()).size(12).style(theme::muted),
+                highlight::block(&rule.kdl, colors, 12.0),
             ]
             .spacing(6)
             .padding([10, 12])
@@ -67,8 +70,11 @@ pub fn view(state: &App) -> El<'_> {
         .filter(|app| apps.contains(&Some(*app)));
     let mut list = Vec::new();
     for &app in &apps {
-        let rules: Vec<usize> = (0..LIBRARY.len())
-            .filter(|&index| LIBRARY[index].app == app)
+        let rules: Vec<usize> = LIBRARY
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.app == app)
+            .map(|(index, _)| index)
             .collect();
         let marked = rules
             .iter()
@@ -101,9 +107,9 @@ pub fn view(state: &App) -> El<'_> {
         if rule.app != picked {
             continue;
         }
-        let have = in_config[index];
+        let have = in_config.get(index).copied().unwrap_or(false);
         let mut mark = checkbox(have || state.rules.library.marked.contains(&index))
-            .label(rule.name)
+            .label(rule.name.as_str())
             .text_size(14);
         if !have {
             mark = mark.on_toggle(move |on| Message::Rules(rules::Message::LibraryMark(index, on)));
@@ -112,7 +118,7 @@ pub fn view(state: &App) -> El<'_> {
             container(
                 column![
                     mark,
-                    text(rule.why).size(12).style(theme::muted),
+                    text(rule.why.as_str()).size(12).style(theme::muted),
                     text(if have {
                         format!("Already in your config. From {}.", rule.source)
                     } else {
@@ -120,7 +126,7 @@ pub fn view(state: &App) -> El<'_> {
                     })
                     .size(12)
                     .style(theme::muted),
-                    highlight::block(rule.kdl, colors, 12.0),
+                    highlight::block(&rule.kdl, colors, 12.0),
                 ]
                 .spacing(6),
             )
@@ -131,8 +137,10 @@ pub fn view(state: &App) -> El<'_> {
     }
     let marked: Vec<usize> = state.rules.library.marked.iter().copied().collect();
     let mut chosen = column![].spacing(4);
-    for &index in &marked {
-        let rule = &LIBRARY[index];
+    for (&index, rule) in marked
+        .iter()
+        .filter_map(|index| Some((index, LIBRARY.get(*index)?)))
+    {
         chosen = chosen.push(
             row![
                 text(rule.app.map_or_else(
@@ -212,8 +220,8 @@ pub fn import(state: &mut App) {
         return;
     };
     let marked: Vec<usize> = state.rules.library.marked.iter().copied().collect();
-    if let Err(e) = library::import(store, &marked, state.rules.library.into_config) {
-        state.status = crate::app::error(e.to_string());
+    if let Err(failure) = library::import(store, &marked, state.rules.library.into_config) {
+        state.status = crate::app::error(failure.to_string());
         return;
     }
     state.rules.library.marked.clear();

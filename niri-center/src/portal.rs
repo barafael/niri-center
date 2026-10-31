@@ -24,7 +24,7 @@ pub async fn choose(folder: bool) -> Result<Option<String>, String> {
         .directory(folder)
         .send()
         .await
-        .map_err(|e| explain(&e))?;
+        .map_err(|error| explain(&error))?;
     match request.response() {
         Ok(files) => Ok(files
             .uris()
@@ -32,7 +32,7 @@ pub async fn choose(folder: bool) -> Result<Option<String>, String> {
             .and_then(|uri| file_path(uri.as_str()))
             .map(|path| crate::store::tilde(std::path::Path::new(&path)))),
         Err(ashpd::Error::Response(ResponseError::Cancelled)) => Ok(None),
-        Err(e) => Err(explain(&e)),
+        Err(error) => Err(explain(&error)),
     }
 }
 
@@ -56,16 +56,16 @@ pub fn file_path(uri: &str) -> Option<String> {
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && let Some(byte) = encoded
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'%'
+            && let Some(decoded) = encoded
                 .get(index + 1..index + 3)
                 .and_then(|hex| u8::from_str_radix(hex, 16).ok())
         {
-            out.push(byte);
+            out.push(decoded);
             index += 3;
         } else {
-            out.push(bytes[index]);
+            out.push(byte);
             index += 1;
         }
     }

@@ -22,16 +22,20 @@ pub fn write_backup(dir: &Path, file_name: &str, content: &str) -> std::io::Resu
 /// Keep only the newest `keep` backups in `dir` (timestamp prefix sorts them).
 pub fn prune(dir: &Path, keep: usize) -> std::io::Result<()> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
         .collect();
     entries.sort();
     let excess = entries.len().saturating_sub(keep);
+    // one backup that cannot go does not keep the newer excess ones
+    let mut first_failure = None;
     for old in entries.iter().take(excess) {
-        let _ = std::fs::remove_file(old);
+        if let Err(failure) = std::fs::remove_file(old) {
+            first_failure.get_or_insert(failure);
+        }
     }
-    Ok(())
+    first_failure.map_or(Ok(()), Err)
 }
 
 /// One stored backup: provenance + location.
@@ -49,8 +53,8 @@ pub fn list_backups(dir: &Path) -> Vec<Backup> {
         return Vec::new();
     };
     entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file())
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
         .filter_map(|path| {
             let name = path.file_name()?.to_str()?;
             let (nano, file) = name.split_once('_')?;
@@ -69,12 +73,12 @@ pub fn list_backups(dir: &Path) -> Vec<Backup> {
 pub fn restore_latest(dir: &Path, file_name: &str) -> Option<String> {
     let mut candidates: Vec<Backup> = list_backups(dir)
         .into_iter()
-        .filter(|b| b.display_name == file_name)
+        .filter(|backup| backup.display_name == file_name)
         .collect();
-    candidates.sort_by_key(|b| b.timestamp_nanos);
+    candidates.sort_by_key(|backup| backup.timestamp_nanos);
     candidates
         .last()
-        .and_then(|b| std::fs::read_to_string(&b.path).ok())
+        .and_then(|backup| std::fs::read_to_string(&backup.path).ok())
 }
 
 #[cfg(test)]
@@ -84,21 +88,21 @@ mod tests {
     #[test]
     fn writes_and_prunes_backups() {
         let dir = tempfile::TempDir::new().unwrap();
-        let d = dir.path();
-        write_backup(d, "config.kdl", "a").unwrap();
-        write_backup(d, "config.kdl", "b").unwrap();
-        write_backup(d, "config.kdl", "c").unwrap();
-        prune(d, 2).unwrap();
-        let remaining: Vec<PathBuf> = std::fs::read_dir(d)
+        let folder = dir.path();
+        write_backup(folder, "config.kdl", "a").unwrap();
+        write_backup(folder, "config.kdl", "b").unwrap();
+        write_backup(folder, "config.kdl", "c").unwrap();
+        prune(folder, 2).unwrap();
+        let remaining: Vec<PathBuf> = std::fs::read_dir(folder)
             .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
             .collect();
         assert_eq!(remaining.len(), 2, "prune keeps the newest two");
         // the two newest contents survive (c, then b)
         let mut texts: Vec<String> = remaining
             .iter()
-            .map(|p| std::fs::read_to_string(p).unwrap())
+            .map(|path| std::fs::read_to_string(path).unwrap())
             .collect();
         texts.sort();
         assert_eq!(texts, vec!["b".to_string(), "c".to_string()]);
@@ -106,23 +110,23 @@ mod tests {
 
     #[test]
     fn writes_respect_subdirectories() {
-        let d = tempfile::TempDir::new().unwrap().path().join("a/b");
-        let path = write_backup(&d, "keybinds.kdl", "x").unwrap();
+        let folder = tempfile::TempDir::new().unwrap().path().join("a/b");
+        let path = write_backup(&folder, "keybinds.kdl", "x").unwrap();
         assert!(path.is_file());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
     }
 
     #[test]
     fn lists_and_restores_newest() {
-        let d = tempfile::TempDir::new().unwrap().path().join("backups");
-        write_backup(&d, "config.kdl", "old").unwrap();
+        let folder = tempfile::TempDir::new().unwrap().path().join("backups");
+        write_backup(&folder, "config.kdl", "old").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        write_backup(&d, "config.kdl", "new").unwrap();
-        write_backup(&d, "keybinds.kdl", "binds").unwrap();
+        write_backup(&folder, "config.kdl", "new").unwrap();
+        write_backup(&folder, "keybinds.kdl", "binds").unwrap();
 
-        let mut names: Vec<String> = list_backups(&d)
+        let mut names: Vec<String> = list_backups(&folder)
             .into_iter()
-            .map(|b| b.display_name)
+            .map(|backup| backup.display_name)
             .collect();
         names.sort();
         assert_eq!(
@@ -134,8 +138,14 @@ mod tests {
             ]
         );
 
-        assert_eq!(restore_latest(&d, "config.kdl").as_deref(), Some("new"));
-        assert_eq!(restore_latest(&d, "keybinds.kdl").as_deref(), Some("binds"));
-        assert_eq!(restore_latest(&d, "unknown.kdl"), None);
+        assert_eq!(
+            restore_latest(&folder, "config.kdl").as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            restore_latest(&folder, "keybinds.kdl").as_deref(),
+            Some("binds")
+        );
+        assert_eq!(restore_latest(&folder, "unknown.kdl"), None);
     }
 }

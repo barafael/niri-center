@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::animations::Spring;
 use crate::bindings::KeyCombo;
 use crate::disk::SaveJob;
 use crate::history::FileChange;
@@ -89,6 +90,24 @@ pub struct BindingRow {
     pub replaces: Vec<String>,
 }
 
+/// The file most of `rows` are in, and how many other files hold the rest;
+/// `None` without bindings. A tie goes to the file named first in order.
+pub fn home_binding_file(rows: &[BindingRow]) -> Option<(&str, usize)> {
+    // per file: how many rows, and where its first row is
+    let mut per_file: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        per_file
+            .entry(row.file.as_str())
+            .or_insert((0, row_index))
+            .0 += 1;
+    }
+    let others = per_file.len().saturating_sub(1);
+    per_file
+        .into_iter()
+        .max_by_key(|&(_, (count, first))| (count, std::cmp::Reverse(first)))
+        .map(|(file, _)| (file, others))
+}
+
 /// One row in a plain settings table (autostart): display text + its file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -99,6 +118,48 @@ pub struct Row {
     pub included: bool,
     /// True when the entry is `/-`-commented out (disabled, not deleted).
     pub disabled: bool,
+}
+
+/// What an edit writes, to say which one is not where it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    WindowRule,
+    Binding,
+}
+
+impl std::fmt::Display for Written {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
+            Self::WindowRule => "window rule",
+            Self::Binding => "binding",
+        })
+    }
+}
+
+/// One loaded file as it is now, everything about it borrowed at once.
+struct LoadedFile<'store> {
+    target: Target,
+    path: &'store Path,
+    /// The text it had when loaded or last saved.
+    original: &'store str,
+    doc: &'store Document,
+}
+
+impl LoadedFile<'_> {
+    /// Whether it holds edits not saved yet. Nothing is copied: a file is
+    /// compared as it is after its last refresh.
+    fn is_pending(&self) -> bool {
+        *self.doc.text() != *self.original
+    }
+
+    /// What saving it would write, beside what it holds on disk.
+    fn change(&self) -> FileChange {
+        FileChange {
+            path: self.path.to_path_buf(),
+            before: self.original.to_string(),
+            after: self.doc.text().into_owned(),
+        }
+    }
 }
 
 /// A file in the loaded set: the main config or one of its includes.
@@ -152,7 +213,11 @@ pub enum StoreError {
     #[error("`{flag}` flag not found in the input tree")]
     FlagMissing { flag: String },
     #[error("the {what} just written is not where it was written")]
-    NotWhereWritten { what: &'static str },
+    NotWhereWritten { what: Written },
+    /// A file or node found before an edit is not there any more: the
+    /// config changed in between.
+    #[error("that part of the config is gone; it changed meanwhile")]
+    Gone,
 }
 
 impl Store {
@@ -220,7 +285,7 @@ impl Store {
     pub fn config_dir(&self) -> &Path {
         self.path
             .parent()
-            .filter(|p| !p.as_os_str().is_empty())
+            .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
     }
 
@@ -252,33 +317,39 @@ impl Store {
 
     // ---- aggregation over the whole set (main + includes) ----
 
-    /// All files in order (main first, then includes).
-    fn targets(&self) -> impl Iterator<Item = Target> {
-        std::iter::once(Target::Main).chain((0..self.included.len()).map(Target::Included))
+    /// The included file `target` stands for. Every target comes from this
+    /// store's own list, which a load fixes, so `Gone` means a target from
+    /// another store.
+    fn included(&self, target_index: usize) -> Result<&IncludedFile, StoreError> {
+        self.included.get(target_index).ok_or(StoreError::Gone)
     }
 
     /// Immutable document access by file.
-    fn doc(&self, target: Target) -> &Document {
+    fn doc(&self, target: Target) -> Result<&Document, StoreError> {
         match target {
-            Target::Main => &self.doc,
-            Target::Included(i) => &self.included[i].doc,
+            Target::Main => Ok(&self.doc),
+            Target::Included(index) => Ok(&self.included(index)?.doc),
         }
     }
 
     /// Mutable document access by file. Every edit through it ends in
     /// [`Self::refresh`], which tells a real change from a no-op.
-    fn doc_mut(&mut self, target: Target) -> &mut Document {
+    fn doc_mut(&mut self, target: Target) -> Result<&mut Document, StoreError> {
         match target {
-            Target::Main => &mut self.doc,
-            Target::Included(i) => &mut self.included[i].doc,
+            Target::Main => Ok(&mut self.doc),
+            Target::Included(index) => self
+                .included
+                .get_mut(index)
+                .map(|file| &mut file.doc)
+                .ok_or(StoreError::Gone),
         }
     }
 
     /// Every binding over the whole set, in index order: its file, its
     /// place among that file's bindings, and its node.
     fn bindings(&self) -> impl Iterator<Item = (Target, usize, &Node)> {
-        self.targets().flat_map(move |target| {
-            active_named(&self.doc(target).roots, "binds")
+        self.files().flat_map(move |(target, _, doc)| {
+            active_named(&doc.roots, "binds")
                 .flat_map(|block| &block.children)
                 .enumerate()
                 .map(move |(position, node)| (target, position, node))
@@ -287,21 +358,17 @@ impl Store {
 
     /// Top-level keybinding rows: structured key + action, with origin file.
     pub fn binding_rows(&self) -> Vec<BindingRow> {
-        let labels: Vec<String> = self
-            .targets()
-            .map(|target| self.file_label(self.target_path(target)))
+        let labels: HashMap<Target, String> = self
+            .files()
+            .map(|(target, path, _)| (target, self.file_label(path)))
             .collect();
-        let label = |target: Target| match target {
-            Target::Main => labels[0].clone(),
-            Target::Included(i) => labels[i + 1].clone(),
-        };
+        let label = |target: Target| labels.get(&target).cloned().unwrap_or_default();
         // every active binding as niri reads them, includes in place: for a
         // combo bound more than once, the last one wins
         let mut read: Vec<Target> = Vec::new();
         let mut place: HashMap<(Target, usize), usize> = HashMap::new();
         let mut by_combo: HashMap<KeyCombo, Vec<usize>> = HashMap::new();
-        for addr in self.reading_order() {
-            let node = self.node(addr);
+        for (addr, node) in self.read_nodes() {
             if node.name != "binds" {
                 continue;
             }
@@ -316,18 +383,22 @@ impl Store {
         }
         let mut out = Vec::new();
         for (target, _, child) in self.bindings() {
-            let doc = self.doc(target);
+            let Ok(doc) = self.doc(target) else {
+                continue;
+            };
             let at = place.get(&(target, child.node_span.start)).copied();
             let same = by_combo
                 .get(&KeyCombo::parse(&child.name))
                 .map_or(&[][..], Vec::as_slice);
             let (hidden_by, replaces) = match (at, same.last()) {
-                (Some(at), Some(&last)) if last != at => (Some(label(read[last])), Vec::new()),
+                (Some(at), Some(&last)) if last != at => {
+                    (read.get(last).map(|&file| label(file)), Vec::new())
+                }
                 (Some(at), _) => (
                     None,
                     same.iter()
                         .filter(|&&index| index != at)
-                        .map(|&index| label(read[index]))
+                        .filter_map(|&index| read.get(index).map(|&file| label(file)))
                         .collect(),
                 ),
                 (None, _) => (None, Vec::new()),
@@ -353,24 +424,27 @@ impl Store {
     /// Autostart rows: the `spawn-at-startup` / `spawn-sh-at-startup` nodes.
     pub fn autostart_rows(&self) -> Vec<Row> {
         self.autostarts()
-            .map(|(target, node)| {
-                let doc = self.doc(target);
-                let args: Vec<String> = node.args.iter().map(|v| doc.value_text(v)).collect();
-                Row {
+            .filter_map(|(target, node)| {
+                let (path, doc) = self.file(target)?;
+                let args: Vec<String> = node
+                    .args
+                    .iter()
+                    .map(|value| doc.value_text(value))
+                    .collect();
+                Some(Row {
                     display: args.join(" "),
-                    file: self.file_label(self.target_path(target)),
+                    file: self.file_label(path),
                     included: target != Target::Main,
                     disabled: node.disabled,
-                }
+                })
             })
             .collect()
     }
 
     /// Every autostart entry over the whole set, in index order.
     fn autostarts(&self) -> impl Iterator<Item = (Target, &Node)> {
-        self.targets().flat_map(move |target| {
-            self.doc(target)
-                .iter_all()
+        self.files().flat_map(move |(target, _, doc)| {
+            doc.iter_all()
                 .filter(|node| is_autostart(node))
                 .map(move |node| (target, node))
         })
@@ -423,13 +497,13 @@ impl Store {
     /// its text is a new revision: an edit that writes what was there
     /// already is none.
     fn refresh(&mut self, target: Target) -> Result<(), StoreError> {
-        let doc = self.doc(target);
+        let doc = self.doc(target)?;
         if doc.pending_edits() == 0 {
             return Ok(());
         }
         let text = doc.to_string();
         let changed = text != doc.source;
-        *self.doc_mut(target) = parse_document(&text).map_err(StoreError::Parse)?;
+        *self.doc_mut(target)? = parse_document(&text).map_err(StoreError::Parse)?;
         if changed {
             self.revision = next_revision();
             self.reading = self.find_reading_order();
@@ -452,14 +526,14 @@ impl Store {
     /// Every top-level `window-rule` (disabled ones included), file by file.
     pub fn window_rule_rows(&self) -> Vec<WindowRuleRow> {
         self.window_rules()
-            .map(|(target, node)| {
-                let doc = self.doc(target);
+            .filter_map(|(target, node)| {
+                let (path, doc) = self.file(target)?;
                 let (criteria, properties): (Vec<&Node>, Vec<&Node>) = node
                     .children
                     .iter()
                     .partition(|child| matches!(child.name.as_str(), "match" | "exclude"));
                 let text = |child: &&Node| child.raw(doc).to_string();
-                WindowRuleRow {
+                Some(WindowRuleRow {
                     matchers: criteria
                         .iter()
                         .map(|child| Matcher {
@@ -479,11 +553,11 @@ impl Store {
                     line: doc.line_of(node.node_span.start),
                     criteria: criteria.iter().map(text).collect(),
                     properties: properties.iter().map(text).collect(),
-                    file: self.file_label(self.target_path(target)),
+                    file: self.file_label(path),
                     included: target != Target::Main,
                     disabled: node.disabled,
                     plain: holds_only_its_lines(doc, node),
-                }
+                })
             })
             .collect()
     }
@@ -507,9 +581,8 @@ impl Store {
 
     /// Every top-level `window-rule`, active or not, in file order.
     fn window_rules(&self) -> impl Iterator<Item = (Target, &Node)> {
-        self.targets().flat_map(move |target| {
-            self.doc(target)
-                .roots
+        self.files().flat_map(move |(target, _, doc)| {
+            doc.roots
                 .iter()
                 .filter(|node| node.name == "window-rule")
                 .map(move |node| (target, node))
@@ -537,8 +610,8 @@ impl Store {
     /// Delete the window rule at `index`, block and all.
     pub fn remove_window_rule(&mut self, index: usize) -> Result<(), StoreError> {
         let (target, node_span) = self.window_rule_at(index)?;
-        let (span, _) = removal_span(&self.doc(target).source, node_span);
-        self.doc_mut(target).splice(span, "");
+        let (span, _) = removal_span(&self.doc(target)?.source, node_span);
+        self.doc_mut(target)?.splice(span, "");
         self.refresh(target)
     }
 
@@ -554,11 +627,11 @@ impl Store {
     /// among [`Self::window_rule_rows`].
     pub fn add_window_rule_text(&mut self, text: &str) -> Result<usize, StoreError> {
         let target = self
-            .reading_order()
-            .iter()
-            .rfind(|addr| self.node(addr).name == "window-rule")
-            .map_or(Target::Main, |addr| addr.target);
-        append_block(self.doc_mut(target), text.trim_end());
+            .read_nodes()
+            .filter(|(_, node)| node.name == "window-rule")
+            .last()
+            .map_or(Target::Main, |(addr, _)| addr.target);
+        append_block(self.doc_mut(target)?, text.trim_end());
         self.refresh(target)?;
         // appended at the end of its file: the last rule there
         self.window_rules()
@@ -567,7 +640,7 @@ impl Store {
             .map(|(index, _)| index)
             .last()
             .ok_or(StoreError::NotWhereWritten {
-                what: "window rule",
+                what: Written::WindowRule,
             })
     }
 
@@ -594,21 +667,21 @@ impl Store {
                     doc,
                 });
                 append_block(
-                    self.doc_mut(Target::Main),
+                    self.doc_mut(Target::Main)?,
                     &format!("include {}", quoted(name)),
                 );
                 self.refresh(Target::Main)?;
                 Target::Included(self.included.len() - 1)
             }
         };
-        append_block(self.doc_mut(target), text.trim_end());
+        append_block(self.doc_mut(target)?, text.trim_end());
         self.refresh(target)
     }
 
     /// The window rule at `index` exactly as written, for editing as text.
     pub fn window_rule_source(&self, index: usize) -> Option<String> {
         let (target, node) = self.window_rules().nth(index)?;
-        Some(node.raw(self.doc(target)).to_string())
+        Some(node.raw(self.doc(target).ok()?).to_string())
     }
 
     /// Replace the window rule at `index` with `text`, which must be one
@@ -624,7 +697,7 @@ impl Store {
             return Err(StoreError::NotOneRule);
         }
         let (target, span) = self.window_rule_at(index)?;
-        self.doc_mut(target).splice(span, text);
+        self.doc_mut(target)?.splice(span, text);
         self.refresh(target)?;
         Ok(index)
     }
@@ -633,7 +706,10 @@ impl Store {
     /// niri-center's windows (suggested or hand-written).
     pub fn has_niri_center_rules(&self) -> bool {
         self.window_rules().any(|(target, node)| {
-            !node.disabled && node.raw(self.doc(target)).contains("niri-center")
+            !node.disabled
+                && self
+                    .doc(target)
+                    .is_ok_and(|doc| node.raw(doc).contains("niri-center"))
         })
     }
 
@@ -653,7 +729,9 @@ impl Store {
 
     /// The file (main first, then includes in order) that satisfies `pred`.
     fn first_doc_with(&self, pred: impl Fn(&Document) -> bool) -> Option<Target> {
-        self.targets().find(|&t| pred(self.doc(t)))
+        self.files()
+            .find(|(_, _, doc)| pred(doc))
+            .map(|(target, _, _)| target)
     }
 
     /// Add `key { body; }` to the first file that has a binds block (main
@@ -664,7 +742,7 @@ impl Store {
         self.ensure_binds()?;
         let target = self.binding_file();
         let index = self
-            .doc(target)
+            .doc(target)?
             .roots
             .iter()
             .position(|node| node.name == "binds" && !node.disabled)
@@ -674,13 +752,16 @@ impl Store {
             &[binding_line(key, body)],
         )?;
         // the last line of the block it went into
-        let added = self.doc(target).roots[index]
+        let added = self
+            .node(&engine::NodeAddr::root(target, index))?
             .children
             .last()
             .map(|node| node.node_span);
         self.bindings()
             .position(|(at, _, node)| at == target && Some(node.node_span) == added)
-            .ok_or(StoreError::NotWhereWritten { what: "binding" })
+            .ok_or(StoreError::NotWhereWritten {
+                what: Written::Binding,
+            })
     }
 
     /// The file new bindings go to: the first with a binds block (main
@@ -690,12 +771,6 @@ impl Store {
             .unwrap_or(Target::Main)
     }
 
-    /// The file [`Self::add_binding`] writes to, as [`Self::file_label`]
-    /// names it.
-    pub fn new_binding_file(&self) -> String {
-        self.file_label(self.target_path(self.binding_file()))
-    }
-
     /// Remove the binding at `index` (0-based over the whole set). The
     /// returned [`RemovedBinding`] puts it back verbatim via
     /// [`Self::restore_binding`].
@@ -703,7 +778,7 @@ impl Store {
         let (target, position, node_span) = self
             .binding_in_file(index)
             .ok_or(StoreError::EntryNotFound { index })?;
-        let source = self.doc(target).source.clone();
+        let source = self.doc(target)?.source.clone();
         let (span, whole_line) = removal_span(&source, node_span);
         let removed = RemovedBinding {
             target,
@@ -711,7 +786,7 @@ impl Store {
             text: source[span.start..span.end].to_string(),
             whole_line,
         };
-        self.doc_mut(target).splice(span, "");
+        self.doc_mut(target)?.splice(span, "");
         self.refresh(target)?;
         Ok(removed)
     }
@@ -720,7 +795,7 @@ impl Store {
     /// before the binding that now holds its position (or at the end of that
     /// file's last `binds` block).
     pub fn restore_binding(&mut self, removed: &RemovedBinding) -> Result<(), StoreError> {
-        let doc = self.doc(removed.target);
+        let doc = self.doc(removed.target)?;
         let binds_blocks: Vec<&Node> = active_named(&doc.roots, "binds").collect();
         let next = binds_blocks
             .iter()
@@ -732,13 +807,13 @@ impl Store {
             (None, whole_line) => {
                 let block = binds_blocks
                     .last()
-                    .and_then(|b| b.block)
+                    .and_then(|node| node.block)
                     .ok_or(StoreError::NoBinds)?;
                 let closing_brace = block.end.saturating_sub(1);
                 let brace_line = line_start(&doc.source, closing_brace);
                 let brace_on_own_line = doc.source[brace_line..closing_brace]
                     .bytes()
-                    .all(|b| matches!(b, b' ' | b'\t'));
+                    .all(|byte| matches!(byte, b' ' | b'\t'));
                 if whole_line && brace_on_own_line {
                     brace_line
                 } else {
@@ -751,7 +826,7 @@ impl Store {
         } else {
             format!("{} ", removed.text)
         };
-        self.doc_mut(removed.target)
+        self.doc_mut(removed.target)?
             .splice(Span::new(insert_at, insert_at), &text);
         self.refresh(removed.target)
     }
@@ -786,7 +861,7 @@ impl Store {
         node_span: Span,
         disabled: bool,
     ) -> Result<(), StoreError> {
-        let source = &self.doc(target).source;
+        let source = &self.doc(target)?.source;
         // where the line's text starts: a `/-` marker, or the node
         let start =
             line_start(source, node_span.start) + indentation(source, node_span.start).len();
@@ -799,7 +874,7 @@ impl Store {
             })
         };
         if let Some((span, text)) = span {
-            self.doc_mut(target).splice(span, text);
+            self.doc_mut(target)?.splice(span, text);
         }
         self.refresh(target)
     }
@@ -817,11 +892,11 @@ impl Store {
     /// sits (if it has a `{ … }` block).
     fn binding_at(&self, index: usize) -> Option<BindingMeta> {
         let (target, _, node) = self.bindings().nth(index)?;
-        let bytes = self.doc(target).source.as_bytes();
+        let bytes = self.doc(target).ok()?.source.as_bytes();
         let mut end = node.node_span.start;
         while bytes
             .get(end)
-            .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+'))
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+'))
         {
             end += 1;
         }
@@ -849,13 +924,13 @@ impl Store {
             Some(action_span) => {
                 // the action's `;` terminator is there already: the key and
                 // the action node change, nothing else
-                let doc = self.doc_mut(meta.target);
+                let doc = self.doc_mut(meta.target)?;
                 doc.splice(meta.name_span, key);
                 doc.splice(action_span, body.trim_end().trim_end_matches(';'));
             }
             None => {
                 // no `{ … }` block: the node is written anew
-                self.doc_mut(meta.target)
+                self.doc_mut(meta.target)?
                     .splice(meta.node_span, &binding_line(key, body));
             }
         }
@@ -884,7 +959,7 @@ impl Store {
         let target = self
             .first_doc_with(|doc| doc.iter_all().any(is_autostart))
             .unwrap_or(Target::Main);
-        let doc = self.doc_mut(target);
+        let doc = self.doc_mut(target)?;
         let end = doc.source.len();
         let sep = if doc.source.ends_with('\n') { "" } else { "\n" };
         doc.splice(Span::new(end, end), &format!("{sep}{line}\n"));
@@ -909,9 +984,9 @@ impl Store {
     /// Splice out a node's whole line (indent + line break included) from the
     /// file it belongs to.
     fn splice_node_line(&mut self, target: Target, span: Span) -> Result<(), StoreError> {
-        let source = self.doc(target).source.clone();
+        let source = self.doc(target)?.source.clone();
         let start = line_start(&source, span.start);
-        self.doc_mut(target).splice(Span::new(start, span.end), "");
+        self.doc_mut(target)?.splice(Span::new(start, span.end), "");
         self.refresh(target)
     }
 
@@ -993,6 +1068,29 @@ impl Store {
         self.setting(&XKB, "layout")
     }
 
+    /// The config's `xkb` block, as niri builds its keymap from it.
+    pub fn xkb(&self) -> crate::keyboard::Xkb {
+        let value = |name| self.setting(&XKB, name).unwrap_or_default();
+        // variants line up with layouts by place, empty ones included
+        let places = |list: String| -> Vec<String> {
+            if list.trim().is_empty() {
+                Vec::new()
+            } else {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            }
+        };
+        crate::keyboard::Xkb {
+            rules: value("rules"),
+            model: value("model"),
+            layouts: places(value("layout")),
+            variants: places(value("variant")),
+            options: value("options"),
+            file: self.setting(&XKB, "file"),
+        }
+    }
+
     /// Set `input.keyboard.xkb { layout "<v>" }`.
     pub fn set_keyboard_layout(&mut self, layout: &str) -> Result<(), StoreError> {
         self.set_setting(&XKB, "layout", &quoted(layout))
@@ -1011,43 +1109,51 @@ impl Store {
 
     /// Every loaded file with the text it had when loaded or last saved.
     pub fn saved_texts(&self) -> impl Iterator<Item = (&Path, &str)> {
-        self.targets()
-            .map(|target| (self.target_path(target), self.original(target)))
+        self.loaded().map(|file| (file.path, file.original))
     }
 
-    /// The text `target` had when loaded or last saved.
-    fn original(&self, target: Target) -> &str {
-        match target {
-            Target::Main => &self.original_main,
-            Target::Included(i) => &self.included[i].original,
-        }
-    }
-
-    /// Whether `target` holds edits not saved yet. Nothing is copied: a
-    /// file is compared as it is after its last refresh.
-    fn is_pending(&self, target: Target) -> bool {
-        *self.doc(target).text() != *self.original(target)
+    /// Each loaded file, main first, with its path, saved text and document.
+    fn loaded(&self) -> impl Iterator<Item = LoadedFile<'_>> {
+        std::iter::once(LoadedFile {
+            target: Target::Main,
+            path: &self.path,
+            original: &self.original_main,
+            doc: &self.doc,
+        })
+        .chain(
+            self.included
+                .iter()
+                .enumerate()
+                .map(|(index, file)| LoadedFile {
+                    target: Target::Included(index),
+                    path: &file.path,
+                    original: &file.original,
+                    doc: &file.doc,
+                }),
+        )
     }
 
     /// How many files hold edits not saved yet.
     pub fn pending_count(&self) -> usize {
-        self.targets()
-            .filter(|&target| self.is_pending(target))
-            .count()
+        self.loaded().filter(LoadedFile::is_pending).count()
     }
 
     /// Whether any file holds edits not saved yet.
     pub fn has_pending(&self) -> bool {
-        self.targets().any(|target| self.is_pending(target))
+        self.loaded().any(|file| file.is_pending())
     }
 
     /// Drop the edits not saved yet: every file back to its saved text.
     pub fn revert_pending(&mut self) {
-        let pending: Vec<Target> = self.targets().filter(|&t| self.is_pending(t)).collect();
-        for target in pending {
-            let saved = self.original(target).to_string();
-            // the saved text parsed once already, so it parses again
-            let _ = self.stage_content(target, &saved);
+        let pending: Vec<(Target, String)> = self
+            .loaded()
+            .filter(LoadedFile::is_pending)
+            .map(|file| (file.target, file.original.to_string()))
+            .collect();
+        for (target, saved) in pending {
+            if self.stage_content(target, &saved).is_err() {
+                // the saved text parsed once already, so it parses again
+            }
         }
     }
 
@@ -1064,14 +1170,7 @@ impl Store {
         SaveJob {
             revision: self.revision,
             main: self.path.clone(),
-            files: self
-                .targets()
-                .map(|target| FileChange {
-                    path: self.target_path(target).to_path_buf(),
-                    before: self.original(target).to_string(),
-                    after: self.doc(target).text().into_owned(),
-                })
-                .collect(),
+            files: self.loaded().map(|file| file.change()).collect(),
         }
     }
 
@@ -1081,7 +1180,11 @@ impl Store {
         for file in job.changed() {
             if file.path == self.path {
                 self.original_main.clone_from(&file.after);
-            } else if let Some(included) = self.included.iter_mut().find(|f| f.path == file.path) {
+            } else if let Some(included) = self
+                .included
+                .iter_mut()
+                .find(|candidate| candidate.path == file.path)
+            {
                 included.original.clone_from(&file.after);
             }
         }
@@ -1106,10 +1209,10 @@ impl Store {
     /// Every loaded file by name, with the text it has now (edits not
     /// saved yet included): what a snapshot keeps.
     pub fn snapshot_files(&self) -> Vec<(String, String)> {
-        self.targets()
-            .map(|target| {
-                let name = short_name(self.target_path(target)).unwrap_or("config.kdl");
-                (name.to_string(), self.doc(target).text().into_owned())
+        self.loaded()
+            .map(|file| {
+                let name = short_name(file.path).unwrap_or("config.kdl");
+                (name.to_string(), file.doc.text().into_owned())
             })
             .collect()
     }
@@ -1132,14 +1235,15 @@ impl Store {
 
     /// The loaded file whose file name is `file_name`.
     fn target_named(&self, file_name: &str) -> Option<Target> {
-        self.targets()
-            .find(|&target| short_name(self.target_path(target)) == Some(file_name))
+        self.loaded()
+            .find(|file| short_name(file.path) == Some(file_name))
+            .map(|file| file.target)
     }
 
     /// Replace a file's whole in-memory content (one splice over all of it).
     fn stage_content(&mut self, target: Target, content: &str) -> Result<(), StoreError> {
-        let end = self.doc(target).source.len();
-        self.doc_mut(target).splice(Span::new(0, end), content);
+        let end = self.doc(target)?.source.len();
+        self.doc_mut(target)?.splice(Span::new(0, end), content);
         self.refresh(target)
     }
 
@@ -1148,12 +1252,11 @@ impl Store {
     /// Names of the animations configured in active `animations` blocks.
     pub fn animation_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        for addr in self.reading_order() {
-            let node = self.node(addr);
+        for (_, node) in self.read_nodes() {
             if node.name != "animations" {
                 continue;
             }
-            for child in node.children.iter().filter(|c| !c.disabled) {
+            for child in node.children.iter().filter(|child| !child.disabled) {
                 if !names.contains(&child.name) {
                     names.push(child.name.clone());
                 }
@@ -1178,9 +1281,9 @@ impl Store {
     }
 
     /// The four control points of a `curve "cubic-bezier" x1 y1 x2 y2`.
-    pub fn bezier_points(&self, animation: &str) -> Option<[f64; 4]> {
+    pub fn bezier_points(&self, animation: &str) -> Option<[f32; 4]> {
         let node = self.setting_node(&animation_chain(animation), "curve")?;
-        let points: Vec<f64> = node
+        let points: Vec<f32> = node
             .args
             .iter()
             .skip(1)
@@ -1203,7 +1306,7 @@ impl Store {
         &mut self,
         animation: &str,
         curve: &str,
-        points: Option<[f64; 4]>,
+        points: Option<[f32; 4]>,
         duration_ms: Option<u32>,
     ) -> Result<(), StoreError> {
         let chain = animation_chain(animation);
@@ -1241,35 +1344,33 @@ impl Store {
     }
 
     /// Current spring parameters of a spring animation, if set.
-    pub fn spring_params(&self, animation: &str) -> Option<(f64, f64, f64)> {
+    pub fn spring_params(&self, animation: &str) -> Option<Spring> {
         let spring = self.setting_node(&animation_chain(animation), "spring")?;
         let prop = |name: &str| {
             spring
                 .props
                 .iter()
-                .find(|p| p.name == name)
-                .and_then(|p| p.value.kind.as_str().parse().ok())
+                .find(|prop| prop.name == name)
+                .and_then(|prop| prop.value.kind.as_str().parse().ok())
         };
-        Some((prop("damping-ratio")?, prop("stiffness")?, prop("epsilon")?))
+        Some(Spring {
+            damping_ratio: prop("damping-ratio")?,
+            stiffness: prop("stiffness")?,
+            epsilon: prop("epsilon")?,
+        })
     }
 
     /// Set `spring damping-ratio=… stiffness=… epsilon=…` on an animation;
     /// a spring replaces the easing (niri rejects both).
-    pub fn set_spring_params(
-        &mut self,
-        animation: &str,
-        damping_ratio: f64,
-        stiffness: f64,
-        epsilon: f64,
-    ) -> Result<(), StoreError> {
+    pub fn set_spring_params(&mut self, animation: &str, spring: Spring) -> Result<(), StoreError> {
         let chain = animation_chain(animation);
         self.unset_setting(&chain, "curve")?;
         self.unset_setting(&chain, "duration-ms")?;
         let props = format!(
             "damping-ratio={} stiffness={} epsilon={}",
-            float_text(damping_ratio),
-            integer_text(stiffness),
-            float_text(epsilon)
+            float_text(spring.damping_ratio),
+            integer_text(spring.stiffness),
+            float_text(spring.epsilon)
         );
         self.set_setting(&chain, "spring", &props)
     }
@@ -1279,13 +1380,9 @@ impl Store {
     /// Every file whose text differs from its saved text: that text, and
     /// the text it has now.
     pub fn pending_files(&self) -> Vec<FileChange> {
-        self.targets()
-            .filter(|&target| self.is_pending(target))
-            .map(|target| FileChange {
-                path: self.target_path(target).to_path_buf(),
-                before: self.original(target).to_string(),
-                after: self.doc(target).text().into_owned(),
-            })
+        self.loaded()
+            .filter(LoadedFile::is_pending)
+            .map(|file| file.change())
             .collect()
     }
 
@@ -1362,7 +1459,7 @@ fn holds_only_its_lines(doc: &Document, node: &Node) -> bool {
     written_parts(doc, node, &mut parts);
     let significant = |text: &str| -> String {
         text.chars()
-            .filter(|c| !c.is_whitespace() && *c != ';')
+            .filter(|character| !character.is_whitespace() && *character != ';')
             .collect()
     };
     significant(node.raw(doc)) == significant(&parts)
@@ -1376,7 +1473,10 @@ fn written_parts(doc: &Document, node: &Node, out: &mut String) {
         out.push_str(value.raw(doc));
     }
     for prop in &node.props {
-        out.push_str(&format!(" {}={}", prop.name, prop.value.raw(doc)));
+        out.push(' ');
+        out.push_str(&prop.name);
+        out.push('=');
+        out.push_str(prop.value.raw(doc));
     }
     if node.block.is_some() {
         out.push('{');
@@ -1731,11 +1831,11 @@ const REGEX_METACHARACTERS: &str = "\\.+*?()|[]{}^$";
 /// `text` with regex metacharacters escaped, so a pattern finds it as is.
 fn escaped(text: &str) -> String {
     let mut pattern = String::new();
-    for c in text.chars() {
-        if REGEX_METACHARACTERS.contains(c) {
+    for character in text.chars() {
+        if REGEX_METACHARACTERS.contains(character) {
             pattern.push('\\');
         }
-        pattern.push(c);
+        pattern.push(character);
     }
     pattern
 }
@@ -1745,16 +1845,16 @@ fn escaped(text: &str) -> String {
 fn unescaped(pattern: &str) -> Option<String> {
     let mut text = String::new();
     let mut chars = pattern.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
+    while let Some(character) = chars.next() {
+        if character == '\\' {
             let next = chars
                 .next()
                 .filter(|next| REGEX_METACHARACTERS.contains(*next))?;
             text.push(next);
-        } else if REGEX_METACHARACTERS.contains(c) {
+        } else if REGEX_METACHARACTERS.contains(character) {
             return None;
         } else {
-            text.push(c);
+            text.push(character);
         }
     }
     Some(text)
@@ -1845,11 +1945,11 @@ fn append_block(doc: &mut Document, text: &str) {
 /// Uses the newline scan so it stays correct even when a `/ -` disable marker
 /// sits between the indentation and the node name.
 fn line_start(source: &str, pos: usize) -> usize {
-    source[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    source[..pos].rfind('\n').map_or(0, |newline| newline + 1)
 }
 
 /// A float-typed config value: niri rejects `damping-ratio=1`, wants `1.0`.
-fn float_text(value: f64) -> String {
+fn float_text(value: f32) -> String {
     if value.fract() == 0.0 {
         format!("{value:.1}")
     } else {
@@ -1858,8 +1958,8 @@ fn float_text(value: f64) -> String {
 }
 
 /// An integer-typed config value (`stiffness=800`).
-fn integer_text(value: f64) -> String {
-    format!("{}", value.round() as i64)
+fn integer_text(value: f32) -> String {
+    format!("{value:.0}")
 }
 
 /// True when the document has an active top-level node named `name`.
@@ -1885,7 +1985,11 @@ fn binding_line(key: &str, body: &str) -> String {
 /// Display text for a binds child node: `spawn-sh "kitty"` / `quit`.
 fn node_display(doc: &Document, node: &Node) -> String {
     if let Some(inner) = node.children.first() {
-        let args: Vec<String> = inner.args.iter().map(|v| doc.value_text(v)).collect();
+        let args: Vec<String> = inner
+            .args
+            .iter()
+            .map(|value| doc.value_text(value))
+            .collect();
         if args.is_empty() {
             inner.name.clone()
         } else {
@@ -1894,7 +1998,11 @@ fn node_display(doc: &Document, node: &Node) -> String {
     } else if node.args.is_empty() {
         node.name.clone()
     } else {
-        let args: Vec<String> = node.args.iter().map(|v| doc.value_text(v)).collect();
+        let args: Vec<String> = node
+            .args
+            .iter()
+            .map(|value| doc.value_text(value))
+            .collect();
         format!("{} {}", node.name, args.join(" "))
     }
 }

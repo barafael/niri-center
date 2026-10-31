@@ -1,0 +1,12 @@
+id: no-shared-state-escape
+language: Rust
+severity: error
+message: "No suppression covers shared state: neither a bare ast-grep-ignore nor one naming no-shared-state or this rule"
+note: "A bare ignore would suppress the line below it, this rule's match included, so it is refused too."
+files:
+  - "*/src/**"
+rule:
+  any:
+    - kind: line_comment
+    - kind: block_comment
+  regex: 'ast-grep-ignore(-file)?(\s*(\*/)?\s*$|:.*\bno-shared-state(-escape)?\b)'

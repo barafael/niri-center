@@ -25,7 +25,10 @@ pub enum Shortcut {
     /// Save an edit that is still waiting for its moment.
     Save,
     Undo,
-    /// Enter: keeps a display change on trial.
+    /// Enter: during a display change on trial it goes back, as Escape
+    /// does. Keeping takes a click, which nobody presses by reflex on a
+    /// black or garbled screen (KScreen focuses Revert for the same
+    /// reason).
     Confirm,
     Close,
     /// Alt+Left: back up one level on a page that goes in, as Escape does.
@@ -74,12 +77,14 @@ pub fn from_event(event: &keyboard::Event, captured: bool) -> Option<Shortcut> {
             digit => digit
                 .parse::<usize>()
                 .ok()
-                .filter(|n| (1..=9).contains(n))
-                .map(|n| Shortcut::Goto(n - 1)),
+                .filter(|digit| (1..=9).contains(digit))
+                .map(|digit| Shortcut::Goto(digit - 1)),
         },
         Key::Character(_) if !captured && !modifiers.alt() && !modifiers.logo() => text
             .as_ref()
-            .filter(|typed| typed.chars().all(|c| !c.is_control()) && !typed.trim().is_empty())
+            .filter(|typed| {
+                typed.chars().all(|character| !character.is_control()) && !typed.trim().is_empty()
+            })
             .map(|typed| Shortcut::Type(typed.to_string())),
         Key::Named(_) | Key::Character(_) | Key::Unidentified => None,
     }

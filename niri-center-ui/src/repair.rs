@@ -112,7 +112,7 @@ pub fn panel(state: &App) -> Option<El<'_>> {
             .session
             .store
             .as_ref()
-            .and_then(|s| s.text_of(&typo.path))
+            .and_then(|store| store.text_of(&typo.path))
     {
         let colors = state.colors();
         let mut lines = column![];
@@ -124,7 +124,13 @@ pub fn panel(state: &App) -> Option<El<'_>> {
             } else {
                 highlight::Mark::Plain
             };
-            lines = lines.push(highlight::numbered(number, line, mark, None, colors));
+            lines = lines.push(highlight::numbered(
+                number,
+                line,
+                mark,
+                highlight::Gutter::Number,
+                colors,
+            ));
         }
         body = body.push(highlight::lines_block(lines));
     }

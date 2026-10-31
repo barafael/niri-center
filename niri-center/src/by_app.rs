@@ -54,7 +54,7 @@ pub fn index(rules: &[WindowRuleRow], windows: &[OpenWindow], system: &SystemDat
         }
     };
     for (index, window) in windows.iter().enumerate() {
-        let found = app(&mut apps, app_name(system, &window.app_id));
+        let found = app(&mut apps, &app_name(system, &window.app_id));
         found.windows.push(index);
         found.app_ids.insert(window.app_id.clone());
     }
@@ -64,12 +64,16 @@ pub fn index(rules: &[WindowRuleRow], windows: &[OpenWindow], system: &SystemDat
         }
         for matcher in rule.matchers.iter().filter(|matcher| !matcher.exclude) {
             // a line without an app ID picks by title or state
-            let Some(prop) = matcher.props.iter().find(|p| p.name == MatchName::AppId) else {
+            let Some(prop) = matcher
+                .props
+                .iter()
+                .find(|prop| prop.name == MatchName::AppId)
+            else {
                 add(&mut others, index);
                 continue;
             };
             for (name, app_id) in named(prop, windows, system) {
-                let found = app(&mut apps, name);
+                let found = app(&mut apps, &name);
                 add(found, index);
                 found.app_ids.extend(app_id);
             }
@@ -87,10 +91,10 @@ pub fn index(rules: &[WindowRuleRow], windows: &[OpenWindow], system: &SystemDat
 }
 
 /// The entry for the app called `name`, made when there is none yet.
-fn app(apps: &mut BTreeMap<String, Entry>, name: String) -> &mut Entry {
+fn app<'apps>(apps: &'apps mut BTreeMap<String, Entry>, name: &str) -> &'apps mut Entry {
     let key = name.to_lowercase();
     apps.entry(key.clone())
-        .or_insert_with(|| entry(Who::App(key), &name))
+        .or_insert_with(|| entry(Who::App(key), name))
 }
 
 /// The entry an open window's app has: apps are known by their name.
@@ -100,7 +104,11 @@ pub fn who(system: &SystemData, app_id: &str) -> Who {
 
 /// The entry a rule shows under: `shown` when the rule is one of its,
 /// else the first that has it.
-pub fn card<'a>(index: &'a [Entry], shown: Option<&Who>, rule: usize) -> Option<&'a Entry> {
+pub fn card<'index>(
+    index: &'index [Entry],
+    shown: Option<&Who>,
+    rule: usize,
+) -> Option<&'index Entry> {
     let has = |entry: &&Entry| entry.rules.contains(&rule);
     index
         .iter()
@@ -133,7 +141,10 @@ impl Entry {
 
     /// Its open windows, those alike (five terminals titled "Alacritty",
     /// all tiled) as one, with how many there are.
-    pub fn alike_windows<'a>(&self, windows: &'a [OpenWindow]) -> Vec<(&'a OpenWindow, usize)> {
+    pub fn alike_windows<'windows>(
+        &self,
+        windows: &'windows [OpenWindow],
+    ) -> Vec<(&'windows OpenWindow, usize)> {
         let mut alike: Vec<(&OpenWindow, usize)> = Vec::new();
         for window in self.windows.iter().filter_map(|&at| windows.get(at)) {
             match alike

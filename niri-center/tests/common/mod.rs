@@ -1,6 +1,12 @@
 //! What the store's tests share: reading configs from disk, and a disk
 //! whose backups, snapshots and probes stay in the test's folder.
 #![allow(dead_code)] // each test file uses some of these
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "clippy.toml's test allowance covers #[test] functions, not helpers"
+)]
 
 use std::path::{Path, PathBuf};
 
@@ -40,12 +46,16 @@ pub fn check(store: &Store) -> Result<(), DiskError> {
 
 /// The newest backup of `name`, staged as that file's text.
 pub fn stage_backup(disk: &Disk, store: &mut Store, name: &str) -> Result<(), String> {
-    let text = disk.backup(name).map_err(|e| e.to_string())?;
-    store.stage_named(name, &text).map_err(|e| e.to_string())
+    let text = disk.backup(name).map_err(|error| error.to_string())?;
+    store
+        .stage_named(name, &text)
+        .map_err(|error| error.to_string())
 }
 
 /// The snapshot `name`, staged over the files it matches.
 pub fn stage_snapshot(disk: &Disk, store: &mut Store, name: &str) -> Result<(), String> {
-    let files = disk.snapshot(name).map_err(|e| e.to_string())?;
-    store.stage_snapshot(&files).map_err(|e| e.to_string())
+    let files = disk.snapshot(name).map_err(|error| error.to_string())?;
+    store
+        .stage_snapshot(&files)
+        .map_err(|error| error.to_string())
 }

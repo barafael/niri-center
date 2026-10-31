@@ -9,5 +9,5 @@ pub fn version() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().next().map(|s| s.trim().to_string())
+    text.lines().next().map(|line| line.trim().to_string())
 }

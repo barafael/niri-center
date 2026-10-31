@@ -22,7 +22,7 @@ env:
   # The test image's tag: the first 12 hex digits of the sha256 of
   # Containerfile.ci and rust-toolchain.toml, in that order. The image job
   # fails while it is stale.
-  CI_IMAGE_TAG: "a00b69c44f94"
+  CI_IMAGE_TAG: "7d59f994f1f0"
 
 jobs:
   fmt:
@@ -97,6 +97,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # what clippy cannot see (lint/rules), and the rules' own examples
+      - run: ast-grep test
+      - run: ast-grep scan
       # The Landlock self-sandbox test skips when the runner kernel lacks
       # Landlock.
       - run: cargo clippy --workspace --all-targets -- -D warnings

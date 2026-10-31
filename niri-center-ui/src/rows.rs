@@ -6,8 +6,8 @@ use iced::widget::{column, container, row, rule, text};
 use iced::{Alignment, Font, Length};
 use niri_center::page::Page;
 use niri_center::settings::{
-    DraftKey, Edit, Note, OutputSetting, Reading, Setting, Spec, line_link, notes, output_chain,
-    read,
+    DraftKey, Edit, Note, OutputSetting, Reading, Section, Setting, Spec, line_link, notes,
+    output_chain, read, unset,
 };
 use niri_center::store::{Block, Store};
 use niri_center::summary::shown;
@@ -19,27 +19,36 @@ use crate::{El, controls, theme};
 /// Every registry section of `page`, as grouped rows.
 pub fn sections(state: &App, page: Page) -> El<'_> {
     let width = state.content_width();
-    let mut groups: Vec<(&'static str, Vec<El<'_>>)> = Vec::new();
+    let mut groups: Vec<(Option<Section>, Vec<El<'_>>)> = Vec::new();
+    let mut previous_parent = None;
     for &setting in Setting::ALL
         .iter()
         .filter(|setting| setting.spec().page == page)
     {
         let spec = setting.spec();
-        let row = setting_row(state, setting, width);
+        // rows that depend on the same setting say so once, on the first
+        let explain_parent = spec.requires != previous_parent;
+        previous_parent = spec.requires;
+        let row = setting_row(state, setting, width, explain_parent);
         match groups.last_mut() {
             Some((section, rows)) if *section == spec.section => rows.push(row),
             Some(_) | None => groups.push((spec.section, vec![row])),
         }
     }
     let mut sections = column![].spacing(24).width(Length::Fill);
-    for (section, rows) in groups {
-        sections = sections.push(group(section.to_string(), rows));
+    for (index, (section, rows)) in groups.into_iter().enumerate() {
+        // the page title already names a first section of the same name
+        let heading = match section {
+            Some(section) if index > 0 || section.title() != page.label() => section.title(),
+            Some(_) | None => "",
+        };
+        sections = sections.push(group(heading.to_string(), rows));
     }
     sections.into()
 }
 
 /// A heading (or none) and its rows on one surface, hairlines between rows.
-pub fn group<'a>(heading: String, rows: Vec<El<'a>>) -> El<'a> {
+pub fn group<'view>(heading: String, rows: Vec<El<'view>>) -> El<'view> {
     let mut body = column![].width(Length::Fill);
     let count = rows.len();
     for (index, row) in rows.into_iter().enumerate() {
@@ -63,7 +72,8 @@ pub const SEMIBOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-fn setting_row(state: &App, id: Setting, width: f32) -> El<'_> {
+/// `explain_parent`: say which setting this one depends on, when that is off.
+fn setting_row(state: &App, id: Setting, width: f32, explain_parent: bool) -> El<'_> {
     let Some(store) = state.store() else {
         return iced::widget::space().into();
     };
@@ -79,9 +89,16 @@ fn setting_row(state: &App, id: Setting, width: f32) -> El<'_> {
             chain: setting.chain,
             key: DraftKey::Setting(id),
             help: setting.help.to_string(),
-            notes: notes(store, &state.system, setting, setting.chain, off_parent),
+            notes: notes(
+                store,
+                &state.system,
+                setting,
+                setting.chain,
+                off_parent.filter(|_| explain_parent),
+            ),
             dimmed: off_parent.is_some(),
             highlighted: state.highlight == Some(id),
+            set: false,
             control: None,
             width,
         },
@@ -92,13 +109,13 @@ fn setting_row(state: &App, id: Setting, width: f32) -> El<'_> {
 /// One display's setting as a row `width` wide. `extra` adds what the
 /// Displays page knows beyond the table, such as the display's size and
 /// modes.
-pub fn output_row<'a>(
-    state: &'a App,
+pub fn output_row<'app>(
+    state: &'app App,
     output: &str,
     id: OutputSetting,
-    extra: Extra<'a>,
+    extra: Extra<'app>,
     width: f32,
-) -> El<'a> {
+) -> El<'app> {
     let setting = id.spec();
     let Some(store) = state.store() else {
         return iced::widget::space().into();
@@ -123,6 +140,7 @@ pub fn output_row<'a>(
             notes,
             dimmed: false,
             highlighted: false,
+            set: false,
             control,
             width,
         },
@@ -132,40 +150,43 @@ pub fn output_row<'a>(
 
 /// What a page says or offers in a display's row beyond the table.
 #[derive(Default)]
-pub struct Extra<'a> {
+pub struct Extra<'view> {
     pub help: Option<String>,
     pub notes: Vec<Note>,
-    pub control: Option<El<'a>>,
+    pub control: Option<El<'view>>,
 }
 
 /// What a row shows besides its setting: where the value lives, and the
 /// words and control a page may give instead of the table's own.
-struct RowParts<'p, 'a> {
-    chain: &'p [Block<'p>],
+struct RowParts<'chain, 'view> {
+    chain: &'chain [Block<'chain>],
     /// Key for drafts and their errors.
     key: DraftKey,
     help: String,
     notes: Vec<Note>,
     dimmed: bool,
     highlighted: bool,
-    control: Option<El<'a>>,
+    /// Whether the config sets the value, rather than niri's default.
+    set: bool,
+    control: Option<El<'view>>,
     /// The width the row has.
     width: f32,
 }
 
 /// A setting's row: its value read where it lives, what it was before the
 /// latest change, and a reset to niri's default.
-fn spec_row<'a>(
-    state: &'a App,
+fn spec_row<'app>(
+    state: &'app App,
     setting: &'static Spec,
-    mut parts: RowParts<'_, 'a>,
+    mut parts: RowParts<'_, 'app>,
     make: impl Fn(Edit) -> Message + Clone + 'static,
-) -> El<'a> {
+) -> El<'app> {
     let Some(store) = state.store() else {
         return iced::widget::space().into();
     };
-    let read_in = |store: &Store| read(store, parts.chain, setting.child, setting.kind);
+    let read_in = |store: &Store| read(store, parts.chain, &setting.child, setting.kind);
     let reading = read_in(store);
+    parts.set = reading != unset(setting.kind);
     let was = state
         .session
         .saved
@@ -175,13 +196,13 @@ fn spec_row<'a>(
         .map(|before| format!("Was {}", shown(setting, &before)));
     let reset = matches!(reading, Reading::Value(Some(_))).then(|| {
         let default = if setting.default.is_empty() {
-            "the default".to_string()
+            String::new()
         } else {
-            format!("the default, {}", setting.default)
+            format!(", {}", setting.default)
         };
         (
             make(Edit::Unset),
-            format!("Remove from the config and use {default}"),
+            format!("Use niri's default{default}. Takes it out of the config."),
         )
     });
     let control = parts.control.take().unwrap_or_else(|| {
@@ -189,12 +210,12 @@ fn spec_row<'a>(
             state,
             &parts.key,
             setting.kind,
-            setting.default,
+            setting.default.as_str(),
             reading,
             make,
         )
     });
-    let path = line_link(store, parts.chain, setting.child);
+    let path = line_link(store, parts.chain, &setting.child);
     row_frame(state, setting, parts, control, path, was, reset)
 }
 
@@ -206,18 +227,19 @@ const FACTS_SIZE: f32 = 12.0;
 /// row is narrow. After a change it is tinted amber and says what the
 /// value `was`. A value written in the config has a `reset` button beside
 /// the control that takes it out again.
-fn row_frame<'a>(
-    state: &'a App,
+fn row_frame<'app>(
+    state: &'app App,
     setting: &Spec,
-    parts: RowParts<'_, 'a>,
-    control: El<'a>,
+    parts: RowParts<'_, 'app>,
+    control: El<'app>,
     path: String,
     was: Option<String>,
     reset: Option<(Message, String)>,
-) -> El<'a> {
+) -> El<'app> {
+    let narrow = parts.width < room::CONTROL_BESIDE_LABEL;
     let stacked = controls::is_wide(state, &parts.key, setting.kind)
-        || parts.width < room::CONTROL_BESIDE_LABEL;
-    let label = text(setting.label).size(14);
+        || (narrow && !controls::fits_beside(setting.kind));
+    let label = text(setting.label.as_str()).size(14);
     let label = if parts.dimmed {
         label.style(theme::muted)
     } else {
@@ -256,33 +278,37 @@ fn row_frame<'a>(
     if let Some(error) = state.session.drafts.error(&parts.key) {
         label = label.push(text(error.clone()).size(12).style(theme::error));
     }
-    let reset: El<'a> = match reset {
-        Some((message, what)) => {
-            controls::icon_button(crate::icons::Icon::Reset, 14.0, what, message)
-        }
-        None => iced::widget::space().width(30).into(),
-    };
+    // the reset sits before the control, so every control in a group ends
+    // at the same edge whether or not its value can be taken out
+    let reset: Option<El<'app>> = reset.map(|(message, what)| {
+        controls::icon_button(crate::icons::Icon::Reset, 14.0, what, message)
+    });
     // narrow windows (a third or half of the screen is common in niri) and
     // controls that need the room stack the control under its label
-    let line: El<'a> = if stacked {
-        column![
-            label,
-            row![control, reset].spacing(4).align_y(Alignment::Center)
-        ]
-        .spacing(8)
-        .padding([10, 12])
-        .width(Length::Fill)
-        .into()
+    let line: El<'app> = if stacked {
+        let mut under = row![control].spacing(4).align_y(Alignment::Center);
+        if let Some(reset) = reset {
+            under = under.push(reset);
+        }
+        column![label, under]
+            .spacing(8)
+            .padding([10, 12])
+            .width(Length::Fill)
+            .into()
     } else {
-        row![
-            label.width(Length::Fill),
-            container(control).width(220).align_right(220),
-            reset,
-        ]
-        .spacing(8)
-        .padding([10, 12])
-        .align_y(Alignment::Center)
-        .into()
+        let control = if narrow {
+            container(control)
+        } else {
+            container(control).width(220).align_right(220)
+        };
+        let mut beside = row![label.width(Length::Fill)]
+            .spacing(8)
+            .padding([10, 12])
+            .align_y(Alignment::Center);
+        if let Some(reset) = reset {
+            beside = beside.push(reset);
+        }
+        beside.push(control).into()
     };
     if changed {
         // tinted, with niri's amber at the left edge
@@ -299,6 +325,21 @@ fn row_frame<'a>(
         .style(theme::changed_row)
         .into();
     }
+    // set in the config: a quiet bar in the accent color at the left edge,
+    // to find what the config sets at a glance (KDE's "highlight changed
+    // settings", always on). Every row keeps the bar's room, so labels
+    // line up whether or not it shows.
+    let edge = container(iced::widget::space().width(3).height(Length::Fill)).height(Length::Fill);
+    let line: El<'app> = row![
+        if parts.set {
+            edge.style(theme::set_bar)
+        } else {
+            edge
+        },
+        line,
+    ]
+    .height(Length::Shrink)
+    .into();
     let frame = container(line).width(Length::Fill);
     if parts.highlighted {
         frame

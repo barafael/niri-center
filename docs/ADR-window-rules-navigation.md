@@ -4,23 +4,10 @@
 the drill-in navigation of gump. Held provisionally (AGENTS.md
 [provisional]).
 
-**Decision.**
-
-- Window rules is an index of apps (an app known by its name, so the IDs
-  its packagings use are one entry; `niri-center/src/by_app.rs`), an app's
-  page, and a rule.
-- One selection holds at every width. With room the index stays beside the
-  level open, each column scrolling on its own; in a third of the screen
-  only that level shows, under a way back up ("All apps > Firefox").
-  Escape or Alt+Left go up one level.
-- Index rows carry no controls. An app's page shows each of its rules
-  whole, with Edit, Turn off and Remove, so a change is two clicks from the
-  index. A "+" in the heading of the apps list and of an app's rules makes a
-  new rule.
-- "Your rules" and "Rule library" are two tabs of the page; tabs between
-  pages stay dropped (`ADR-design-rules.md`).
-- The header search lists the page's apps and rules before settings and
-  pages.
+**Decision.** Window rules goes in by level: an index of apps, an app's
+page with its rules whole, and a rule. With room the index stays beside the
+level open; in a third of the screen only that level shows, under a way
+back up.
 
 **Why.** One long list of rules beside a list of open windows made people
 match the two by hand, and every row carried controls to scan past. niri

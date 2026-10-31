@@ -25,7 +25,7 @@ pub const SEARCH_INPUT: &str = "search-input";
 /// width the page cannot work out: a toolbar beside the keyboard, a field
 /// in the rule form. It is built again at every layout, so whole pages go
 /// by [`App::content_width`] instead.
-pub fn by_width<'a>(layout: impl Fn(f32) -> El<'a> + 'a) -> El<'a> {
+pub fn by_width<'view>(layout: impl Fn(f32) -> El<'view> + 'view) -> El<'view> {
     iced::widget::responsive(move |size| layout(size.width))
         .height(Length::Shrink)
         .into()
@@ -43,6 +43,25 @@ pub fn view(state: &App) -> El<'_> {
         .into();
     // the toast floats over the page; the rest of the page stays clickable
     let toast: El<'_> = toast(state).unwrap_or_else(|| space().into());
+    // a display change on trial: over every page, so it never goes back
+    // unseen, dropping in at the top as niri's own notification does
+    let trial: El<'_> = pages::displays::trial(state).map_or_else(
+        || space().into(),
+        |card| {
+            // centered over the page, not the window: the sidebar and the
+            // config column keep their room
+            let beside = |width: f32| if width > 0.0 { width + 1.0 } else { 0.0 };
+            container(crate::motion::drop_in(card, state.motions.notice))
+                .center_x(Length::Fill)
+                .padding(iced::Padding {
+                    top: 64.0,
+                    right: 16.0 + beside(state.source_width()),
+                    bottom: 0.0,
+                    left: 16.0 + beside(state.sidebar_width()),
+                })
+                .into()
+        },
+    );
     let dialog: El<'_> = if state.review_open && state.session.pending() > 0 {
         overlay(review_card(state), Message::ShowReview(false))
     } else if let Some(form) = (state.page == Page::Rules)
@@ -60,14 +79,15 @@ pub fn view(state: &App) -> El<'_> {
     } else {
         space().into()
     };
-    // the same three layers whether or not a toast or dialog shows: iced
+    // the same layers whether or not a toast, trial or dialog shows: iced
     // keeps a widget's state (how far a list is scrolled, which field has
     // focus) by its place in the tree, so wrapping the page only while
     // something floats over it would scroll every list back to the top
-    stack![base, toast, dialog].into()
+    stack![base, toast, trial, dialog].into()
 }
 
-/// Header, banner, then the sidebar, the page and its config source.
+/// Header, banner, then the sidebar, the page and its config source, and
+/// what became of the latest change along the bottom.
 fn frame(state: &App) -> El<'_> {
     let narrow = state.narrow();
     let mut content = column![]
@@ -92,11 +112,15 @@ fn frame(state: &App) -> El<'_> {
                 .on_press(Message::PopOut(state.page)),
         );
     }
-    // the page starts at the sidebar's edge, whatever the window's width
+    // the page sits in the middle of the room it has, as KDE and GNOME
+    // center their settings, so a wide window has room on both sides
     let page: El<'_> = if state.page_scrolls_itself() && state.header_search.is_none() {
-        content.height(Length::Fill).into()
+        container(content.height(Length::Fill))
+            .center_x(Length::Fill)
+            .height(Length::Fill)
+            .into()
     } else {
-        scrollable(content)
+        scrollable(container(content).center_x(Length::Fill))
             .style(theme::scrollbar)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -104,19 +128,15 @@ fn frame(state: &App) -> El<'_> {
     };
     let mut body = Row::new().height(Length::Fill);
     if state.pane.is_none() {
-        body = body
-            .push(sidebar(state))
-            .push(container(space().width(1).height(Length::Fill)).style(theme::hairline));
+        body = body.push(sidebar(state)).push(hairline_down());
     }
     body = body.push(container(page).width(Length::Fill).height(Length::Fill));
     if state.source_open() {
-        body = body
-            .push(container(space().width(1).height(Length::Fill)).style(theme::hairline))
-            .push(
-                container(source::view(state))
-                    .width(state.source_width())
-                    .height(Length::Fill),
-            );
+        body = body.push(hairline_down()).push(
+            container(source::view(state))
+                .width(state.source_width())
+                .height(Length::Fill),
+        );
     }
     let mut frame = column![
         container(header(state))
@@ -125,11 +145,20 @@ fn frame(state: &App) -> El<'_> {
     ]
     .width(Length::Fill)
     .height(Length::Fill);
-    frame = frame.push(container(space().height(1).width(Length::Fill)).style(theme::hairline));
+    frame = frame.push(hairline_across());
     if let Some(banner) = banner(state) {
         frame = frame.push(banner);
     }
-    frame.push(body).into()
+    frame = frame.push(body);
+    if let Some(saving) = saving_line(state, narrow) {
+        frame = frame.push(hairline_across()).push(
+            container(saving)
+                .padding(if narrow { [8, 12] } else { [8, 16] })
+                .width(Length::Fill)
+                .style(theme::header_band),
+        );
+    }
+    frame.into()
 }
 
 /// The sections under their headings, always at the left. Folded, it is a
@@ -140,12 +169,7 @@ fn sidebar(state: &App) -> El<'_> {
     for (index, (heading, pages)) in Page::SIDEBAR.into_iter().enumerate() {
         if folded {
             if index > 0 {
-                list = list.push(
-                    container(
-                        container(space().height(1).width(Length::Fill)).style(theme::hairline),
-                    )
-                    .padding([8, 6]),
-                );
+                list = list.push(container(hairline_across()).padding([8, 6]));
             }
         } else {
             list = list.push(
@@ -158,7 +182,8 @@ fn sidebar(state: &App) -> El<'_> {
             );
         }
         for &page in pages {
-            let current = page == state.page;
+            // the search results stand in for the page while they show
+            let current = page == state.page && state.header_search.is_none();
             let entry: El<'_> = if folded {
                 iced::widget::tooltip(
                     button(container(icons::strong(page_icon(page), 16.0)).center_x(Length::Fill))
@@ -191,25 +216,44 @@ fn sidebar(state: &App) -> El<'_> {
             list = list.push(entry);
         }
     }
-    let fold = iced::widget::tooltip(
-        button(
-            container(icons::icon(icons::Icon::Sidebar, 16.0)).center_x(if folded {
-                Length::Fill
-            } else {
-                Length::Shrink
-            }),
-        )
-        .padding([8, 10])
-        .width(Length::Fill)
-        .style(button::text)
-        .on_press(Message::ToggleSidebar),
-        controls::tip(if folded {
+    let fold = sidebar_button(
+        icons::Icon::Sidebar,
+        None,
+        if folded {
             "Show the names, Ctrl+B"
         } else {
             "Fold to icons, Ctrl+B"
-        }),
-        iced::widget::tooltip::Position::Right,
+        },
+        false,
+        Some(Message::ToggleSidebar),
     );
+    let help = sidebar_button(
+        icons::Icon::Help,
+        None,
+        "Help, F1",
+        state.help_open,
+        Some(Message::ShowHelp(!state.help_open)),
+    );
+    let (toggle, what) = config_toggle(state);
+    let config = sidebar_button(
+        icons::Icon::Source,
+        (!folded).then_some("Config text"),
+        what,
+        state.source_open(),
+        toggle,
+    );
+    // one row under the names, a column in the folded rail
+    let foot: El<'_> = if folded {
+        column![config, help, fold].spacing(2).into()
+    } else {
+        row![
+            container(config).width(Length::Fill),
+            container(help).width(40),
+            container(fold).width(40),
+        ]
+        .spacing(2)
+        .into()
+    };
     container(
         column![
             scrollable(list)
@@ -221,7 +265,8 @@ fn sidebar(state: &App) -> El<'_> {
                 ))
                 .style(theme::scrollbar)
                 .height(Length::Fill),
-            fold
+            hairline_across(),
+            foot,
         ]
         .spacing(8),
     )
@@ -231,7 +276,96 @@ fn sidebar(state: &App) -> El<'_> {
     .into()
 }
 
-/// The search, and on the right what the latest change was, with Undo.
+/// What the config button at the foot of the sidebar does on this page,
+/// and its tooltip: the page's part of config.kdl beside it, or in a
+/// window of its own where there is no room beside it. Pages without a
+/// part of their own leave it unavailable.
+pub(crate) fn config_toggle(state: &App) -> (Option<Message>, &'static str) {
+    if state.store().is_none() || !state.page.has_source() {
+        return (None, "This page has no config text of its own");
+    }
+    if state.shows_source() {
+        return if state.source_shown {
+            (Some(Message::ShowSource(false)), "Hide config.kdl, Ctrl+.")
+        } else {
+            (
+                Some(Message::ShowSource(true)),
+                "Show config.kdl beside the page, Ctrl+.",
+            )
+        };
+    }
+    if cfg!(target_arch = "wasm32") {
+        (Some(Message::Page(Page::Source)), "Show config.kdl")
+    } else {
+        (
+            Some(Message::PopOut(Page::Source)),
+            "Show config.kdl in its own window, Ctrl+Shift+N",
+        )
+    }
+}
+
+/// A 1 px line across, between parts of the window.
+fn hairline_across<'view>() -> El<'view> {
+    container(space().height(1).width(Length::Fill))
+        .style(theme::hairline)
+        .into()
+}
+
+/// A 1 px line down, between columns.
+fn hairline_down<'view>() -> El<'view> {
+    container(space().width(1).height(Length::Fill))
+        .style(theme::hairline)
+        .into()
+}
+
+/// A button at the foot of the sidebar: an icon and its `label`, or the
+/// icon alone, which its tooltip names. `on` marks what it shows as
+/// showing. Without a message it is unavailable.
+fn sidebar_button<'text>(
+    icon: icons::Icon,
+    label: Option<&'text str>,
+    tip: &'text str,
+    on: bool,
+    message: Option<Message>,
+) -> El<'text> {
+    let available = message.is_some();
+    let drawn = if available {
+        icons::strong(icon, 16.0)
+    } else {
+        icons::icon(icon, 16.0)
+    };
+    let face: El<'text> = if let Some(label) = label {
+        let words = text(label).size(13).wrapping(text::Wrapping::None);
+        row![
+            drawn,
+            if available {
+                words
+            } else {
+                words.style(theme::muted)
+            }
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        container(drawn).center_x(Length::Fill).into()
+    };
+    let mut press = button(face)
+        .padding(if label.is_some() { [8, 10] } else { [8, 0] })
+        .width(Length::Fill)
+        .style(theme::history_item(on));
+    if let Some(message) = message {
+        press = press.on_press(message);
+    }
+    iced::widget::tooltip(
+        press,
+        controls::tip(tip),
+        iced::widget::tooltip::Position::Right,
+    )
+    .into()
+}
+
+/// The search, or the page's name in a window of its own.
 fn header(state: &App) -> El<'_> {
     let narrow = state.narrow();
     let mut header = Row::<Message>::new()
@@ -285,13 +419,12 @@ fn header(state: &App) -> El<'_> {
             .into()
         });
     }
-    if let Some(saving) = saving_line(state, narrow) {
-        header = header.push(saving);
-    }
     header.into()
 }
 
-/// What happened to the latest change, and Undo: on the header's right.
+/// What happened to the latest change, and Undo: along the window's
+/// bottom, for every page, since Undo takes back the latest change
+/// wherever it was made. A display change on trial has its banner instead.
 fn saving_line(state: &App, narrow: bool) -> Option<El<'_>> {
     let undo = || {
         button(text("Undo").size(13))
@@ -303,67 +436,57 @@ fn saving_line(state: &App, narrow: bool) -> Option<El<'_>> {
         .history
         .last()
         .filter(|_| state.session.saved_this_session);
-    let (note, buttons): (El<'_>, Vec<El<'_>>) = if let Some(trial) = &state.session.trial {
-        (
-            text(format!("On trial, going back in {} s", trial.seconds_left))
+    if state.session.trial.is_some() {
+        return None;
+    }
+    let (note, buttons): (El<'_>, Vec<El<'_>>) = match state.session.save_state() {
+        SaveState::WaitingForNiri => (
+            text("Waiting until niri can read the config")
+                .size(12)
+                .style(theme::pending)
+                .into(),
+            vec![undo().into()],
+        ),
+        SaveState::NotSaved(_) => (
+            text("Not saved").size(12).style(theme::error).into(),
+            vec![undo().into()],
+        ),
+        SaveState::OnRequest { files } => (
+            text(format!("{} not saved", count(files, "file", "files")))
                 .size(12)
                 .style(theme::pending)
                 .into(),
             vec![
-                button(text("Keep").size(13))
+                button(text("Review").size(13))
+                    .style(theme::secondary)
+                    .on_press(Message::ShowReview(true))
+                    .into(),
+                button(text("Save").size(13))
                     .style(theme::primary)
-                    .on_press(Message::KeepTrial)
+                    .on_press(Message::SaveNow)
                     .into(),
             ],
-        )
-    } else {
-        match state.session.save_state() {
-            SaveState::WaitingForNiri => (
-                text("Waiting until niri can read the config")
+        ),
+        SaveState::Saving => (
+            text("Saving").size(12).style(theme::muted).into(),
+            vec![undo().into()],
+        ),
+        SaveState::Saved => {
+            let entry = latest?;
+            let title = summary::short_title(entry);
+            let shown = if narrow { shortened(title, 40) } else { title };
+            (
+                text(format!("{shown} saved"))
                     .size(12)
-                    .style(theme::pending)
+                    .style(theme::muted)
                     .into(),
                 vec![undo().into()],
-            ),
-            SaveState::NotSaved(_) => (
-                text("Not saved").size(12).style(theme::error).into(),
-                vec![undo().into()],
-            ),
-            SaveState::OnRequest { files } => (
-                text(format!("{} not saved", count(files, "file", "files")))
-                    .size(12)
-                    .style(theme::pending)
-                    .into(),
-                vec![
-                    button(text("Review").size(13))
-                        .style(theme::secondary)
-                        .on_press(Message::ShowReview(true))
-                        .into(),
-                    button(text("Save").size(13))
-                        .style(theme::primary)
-                        .on_press(Message::SaveNow)
-                        .into(),
-                ],
-            ),
-            SaveState::Saving => (
-                text("Saving").size(12).style(theme::muted).into(),
-                vec![undo().into()],
-            ),
-            SaveState::Saved => {
-                let entry = latest?;
-                let title = summary::short_title(entry);
-                let shown = if narrow { shortened(title, 24) } else { title };
-                (
-                    text(format!("{shown} saved"))
-                        .size(12)
-                        .style(theme::muted)
-                        .into(),
-                    vec![undo().into()],
-                )
-            }
+            )
         }
     };
-    let mut line = row![note].spacing(12).align_y(Alignment::Center);
+    let mut line = row![container(note).width(Length::Fill)]
+        .spacing(12)
+        .align_y(Alignment::Center);
     for button in buttons {
         line = line.push(button);
     }
@@ -421,17 +544,17 @@ impl Hits {
     }
 
     /// The `n`th, counting the page's first.
-    pub fn nth(self, n: usize) -> Option<Hit> {
-        self.here.into_iter().chain(self.everywhere).nth(n)
+    pub fn nth(self, place: usize) -> Option<Hit> {
+        self.here.into_iter().chain(self.everywhere).nth(place)
     }
 }
 
 /// What the header search found, in place of the page: on the page shown
 /// first, then everywhere.
-fn search_results<'a>(state: &'a App, query: &str, selected: usize) -> El<'a> {
+fn search_results<'app>(state: &'app App, query: &str, selected: usize) -> El<'app> {
     let hits = Hits::of(state, query);
     let skip = hits.here.len();
-    let rows = |hits: Vec<Hit>, first: usize| -> Vec<El<'a>> {
+    let rows = |hits: Vec<Hit>, first: usize| -> Vec<El<'app>> {
         hits.into_iter()
             .enumerate()
             .map(|(index, hit)| {
@@ -473,7 +596,7 @@ fn search_results<'a>(state: &'a App, query: &str, selected: usize) -> El<'a> {
 }
 
 /// A full-width strip under the header, tinted with one of the colors.
-fn strip<'a>(content: Column<'a, Message>, tint: fn(&theme::Colors) -> Color) -> El<'a> {
+fn strip<'view>(content: Column<'view, Message>, tint: fn(&theme::Colors) -> Color) -> El<'view> {
     container(content.spacing(8))
         .padding([8, 16])
         .width(Length::Fill)
@@ -490,11 +613,6 @@ fn strip<'a>(content: Column<'a, Message>, tint: fn(&theme::Colors) -> Color) ->
 /// Why the latest change is not saved, or what the browser demo is. niri
 /// failing to read the config gets a panel on the page instead.
 fn banner(state: &App) -> Option<El<'_>> {
-    // a display change on trial: on every page, so it never goes back
-    // unseen
-    if let Some(trial) = pages::displays::trial(state) {
-        return Some(container(trial).padding([8, 16]).into());
-    }
     if let Some(problem) = &state.session.problem {
         let (message, details, copy) = match problem {
             Problem::Rejected(diagnostics) => (
@@ -532,7 +650,7 @@ fn banner(state: &App) -> Option<El<'_>> {
         if let Some(details) = details {
             content = content.push(controls::diagnostics(&details));
         }
-        return Some(strip(content, |c| c.error));
+        return Some(strip(content, |colors| colors.error));
     }
     if let Some(store) = &state.session.store
         && state
@@ -559,7 +677,7 @@ fn banner(state: &App) -> Option<El<'_>> {
                 .spacing(12)
                 .align_y(Alignment::Center)
             ],
-            |c| c.pending,
+            |colors| colors.pending,
         ));
     }
     if state.session.platform == Platform::Browser && state.session.health().is_none() {
@@ -570,7 +688,7 @@ fn banner(state: &App) -> Option<El<'_>> {
                 )
                 .size(13),
             ],
-            |c| c.accent,
+            |colors| colors.accent,
         ));
     }
     None
@@ -581,21 +699,17 @@ fn banner(state: &App) -> Option<El<'_>> {
 fn toast(state: &App) -> Option<El<'_>> {
     let status = state.status.as_ref()?;
     let tint: fn(&theme::Colors) -> Color = if status.error {
-        |c| c.error
+        |colors| colors.error
     } else {
-        |c| c.success
+        |colors| colors.success
     };
     let card = container(
         row![
-            icons::tinted(
-                if status.error {
-                    icons::Icon::Alert
-                } else {
-                    icons::Icon::Check
-                },
-                16.0,
-                tint,
-            ),
+            if status.error {
+                icons::tinted(icons::Icon::Alert, 16.0, icons::Tint::Error)
+            } else {
+                icons::tinted(icons::Icon::Check, 16.0, icons::Tint::Success)
+            },
             text(status.text.clone()).size(13).width(Length::Fill),
             iced::widget::tooltip(
                 button(icons::icon(icons::Icon::Remove, 10.0))
@@ -664,23 +778,48 @@ fn dialog_card(content: El<'_>, window_height: f32) -> El<'_> {
         .into()
 }
 
-fn overlay_card<'a>(content: Column<'a, Message>) -> El<'a> {
+fn overlay_card<'view>(content: Column<'view, Message>) -> El<'view> {
     container(content.spacing(8).padding(16))
         .width(Length::Fixed(560.0))
         .style(theme::popup)
         .into()
 }
 
+/// Help: niri's own documentation for the page, the app's keys, and what
+/// the app is.
 fn help_card(state: &App) -> El<'_> {
     let pane_mode = state.pane.is_some();
     let mut list = column![
         row![
-            text("Keyboard").size(18).font(SEMIBOLD).width(Length::Fill),
+            text("Help").size(18).font(SEMIBOLD).width(Length::Fill),
             text("F1 or Ctrl+? shows this").size(12).style(theme::muted),
         ]
         .align_y(Alignment::Center)
     ]
     .spacing(6);
+    if state.page.docs().is_some() {
+        list = list.push(
+            row![
+                text(format!(
+                    "What niri says about {}",
+                    state.page.label().to_lowercase()
+                ))
+                .size(13)
+                .width(Length::Fill),
+                button(text("Open niri's documentation").size(13))
+                    .style(theme::secondary)
+                    .on_press(Message::OpenDocs(state.page)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        );
+    }
+    list = list.push(
+        container(text("Keyboard").size(15).font(SEMIBOLD)).padding(iced::Padding {
+            top: 8.0,
+            ..iced::Padding::ZERO
+        }),
+    );
     for group in search::HelpGroup::ALL {
         // single-pane windows have no sections to move between or search
         if pane_mode && group == search::HelpGroup::MovingAround {
@@ -695,8 +834,8 @@ fn help_card(state: &App) -> El<'_> {
         for line in search::HELP.iter().filter(|line| line.group == group) {
             list = list.push(
                 row![
-                    text(line.what).size(13).width(Length::Fill),
-                    text(line.keys)
+                    text(line.what.as_str()).size(13).width(Length::Fill),
+                    text(line.keys.as_str())
                         .size(13)
                         .font(theme::MONO)
                         .style(theme::accent),
@@ -731,6 +870,21 @@ fn help_card(state: &App) -> El<'_> {
             .style(theme::pending),
         );
     }
+    list = list.push(
+        column![
+            text("About").size(15).font(SEMIBOLD),
+            text(format!(
+                "niri-center {}, an unofficial settings app for niri.",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .size(13),
+        ]
+        .spacing(6)
+        .padding(iced::Padding {
+            top: 8.0,
+            ..iced::Padding::ZERO
+        }),
+    );
     overlay_card(list)
 }
 
@@ -740,6 +894,7 @@ fn review_card(state: &App) -> El<'_> {
         return space().into();
     };
     let colors = state.colors();
+    let card_width = 720.0_f32.min(state.width() - 40.0);
     let mut list = column![
         text("Not saved yet").size(18).font(SEMIBOLD),
         text("niri validate checks it when you save.")
@@ -749,17 +904,18 @@ fn review_card(state: &App) -> El<'_> {
     .spacing(8);
     for file in store.pending_diffs() {
         list = list.push(text(file.path).size(13).font(theme::MONO));
-        list = list.push(history::diff_view(&file.hunks, colors));
+        list = list.push(history::diff_view(&file.hunks, colors, card_width - 48.0));
     }
     list = list.push(
+        // as every dialog: the way out last, at the right
         row![
-            button(text("Save these changes").size(13))
-                .style(theme::primary)
-                .on_press(Message::SaveNow),
             button(text("Copy as a diff").size(13))
                 .style(theme::secondary)
                 .on_press(Message::CopyPending),
             space().width(Length::Fill),
+            button(text("Save these changes").size(13))
+                .style(theme::primary)
+                .on_press(Message::SaveNow),
             button(text("Undo all of it").size(13))
                 .style(theme::danger)
                 .on_press(Message::Undo),
@@ -772,7 +928,7 @@ fn review_card(state: &App) -> El<'_> {
     );
     container(scrollable(list).style(theme::scrollbar))
         .max_height(state.height() - 160.0)
-        .width(Length::Fixed(720.0_f32.min(state.width() - 40.0)))
+        .width(Length::Fixed(card_width))
         .padding(16)
         .style(theme::popup)
         .into()
@@ -825,7 +981,8 @@ fn close_card(state: &App) -> El<'_> {
             false,
         ),
     };
-    let mut buttons = row![].spacing(10);
+    // as every dialog: right-aligned, the way out last
+    let mut buttons = row![space().width(Length::Fill)].spacing(10);
     if can_save {
         buttons = buttons.push(
             button(text("Save and close").size(13))
@@ -846,7 +1003,6 @@ fn close_card(state: &App) -> El<'_> {
             .style(theme::danger)
             .on_press(Message::CloseDiscard),
         )
-        .push(space().width(Length::Fill))
         .push(
             button(text("Keep editing").size(13))
                 .style(theme::secondary)
@@ -866,7 +1022,8 @@ const fn page_icon(page: Page) -> icons::Icon {
         Page::Input => icons::Icon::Mouse,
         Page::Cursor => icons::Icon::Pointer,
         Page::Gestures => icons::Icon::Gesture,
-        Page::Displays | Page::Windows => icons::Icon::Display,
+        Page::Displays => icons::Icon::Display,
+        Page::Windows => icons::Icon::Windows,
         Page::Screenshots => icons::Icon::Camera,
         Page::Layout => icons::Icon::Columns,
         Page::Rules => icons::Icon::WindowRule,
@@ -875,7 +1032,9 @@ const fn page_icon(page: Page) -> icons::Icon {
         Page::Animations => icons::Icon::Curve,
         Page::Startup => icons::Icon::Startup,
         Page::Environment => icons::Icon::Environment,
-        Page::History | Page::Events => icons::Icon::Clock,
-        Page::Files | Page::Source => icons::Icon::File,
+        Page::History => icons::Icon::Clock,
+        Page::Events => icons::Icon::Events,
+        Page::Files => icons::Icon::Folder,
+        Page::Source => icons::Icon::File,
     }
 }

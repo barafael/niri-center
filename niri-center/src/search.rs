@@ -3,6 +3,7 @@
 
 use crate::page::Page;
 use crate::settings::Setting;
+use crate::words::Words;
 
 /// One search result: a page, or a setting on a page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,18 +80,18 @@ impl Default for Index {
 impl Index {
     /// Pages and settings whose text contains every query word.
     pub fn matches(&self, query: &str) -> impl Iterator<Item = &Entry> {
-        let words = Words::of(query);
+        let terms = Terms::of(query);
         self.0
             .iter()
-            .filter(move |(_, haystack)| words.all_in(haystack))
+            .filter(move |(_, haystack)| terms.all_in(haystack))
             .map(|(entry, _)| entry)
     }
 }
 
 /// A query's words, lower case: what a search looks for.
-pub struct Words(Vec<String>);
+pub struct Terms(Vec<String>);
 
-impl Words {
+impl Terms {
     pub fn of(query: &str) -> Self {
         Self(query.split_whitespace().map(str::to_lowercase).collect())
     }
@@ -121,7 +122,10 @@ fn entries() -> Vec<(Entry, String)> {
         let spec = setting.spec();
         (
             Entry {
-                label: format!("{}: {}", spec.section, spec.label),
+                label: spec.section.map_or_else(
+                    || spec.label.to_string(),
+                    |section| format!("{section}: {}", spec.label),
+                ),
                 detail: spec.path(),
                 page: spec.page,
                 setting: Some(setting),
@@ -162,106 +166,108 @@ impl HelpGroup {
 pub struct HelpLine {
     pub group: HelpGroup,
     /// The keys, as people read them.
-    pub keys: &'static str,
-    pub what: &'static str,
+    pub keys: Words,
+    pub what: Words,
     /// The same keys as niri writes them in a bind: niri takes a bound key
     /// before the app sees it.
-    pub binds: &'static [&'static str],
+    pub binds: &'static [Words],
 }
 
 /// The app's own keys, as the help card lists them.
-pub const HELP: [HelpLine; 15] = [
+pub const HELP: [HelpLine; 14] = [
     HelpLine {
         group: HelpGroup::MovingAround,
-        keys: "Ctrl+PgUp, Ctrl+PgDn",
-        what: "Previous or next section",
-        binds: &["Ctrl+Page_Up", "Ctrl+Page_Down"],
+        keys: Words("Ctrl+PgUp, Ctrl+PgDn"),
+        what: Words("Previous or next section"),
+        binds: &[Words("Ctrl+Page_Up"), Words("Ctrl+Page_Down")],
     },
     HelpLine {
         group: HelpGroup::MovingAround,
-        keys: "Ctrl+1 to Ctrl+0",
-        what: "Go to the first ten sections",
+        keys: Words("Ctrl+1 to Ctrl+0"),
+        what: Words("Go to the first ten sections"),
         binds: &[
-            "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8",
-            "Ctrl+9", "Ctrl+0",
+            Words("Ctrl+1"),
+            Words("Ctrl+2"),
+            Words("Ctrl+3"),
+            Words("Ctrl+4"),
+            Words("Ctrl+5"),
+            Words("Ctrl+6"),
+            Words("Ctrl+7"),
+            Words("Ctrl+8"),
+            Words("Ctrl+9"),
+            Words("Ctrl+0"),
         ],
     },
     HelpLine {
         group: HelpGroup::MovingAround,
-        keys: "Ctrl+F, Ctrl+K, or type",
-        what: "Find a setting, key or action",
-        binds: &["Ctrl+F", "Ctrl+K"],
+        keys: Words("Ctrl+F, Ctrl+K, or type"),
+        what: Words("Find a setting, key or action"),
+        binds: &[Words("Ctrl+F"), Words("Ctrl+K")],
     },
     HelpLine {
         group: HelpGroup::MovingAround,
-        keys: "Up, Down",
-        what: "Move in the search results",
-        binds: &[],
-    },
-    HelpLine {
-        group: HelpGroup::MovingAround,
-        keys: "Esc",
-        what: "Close search or this list, or go back",
+        keys: Words("Up, Down"),
+        what: Words("Move in the search results"),
         binds: &[],
     },
     HelpLine {
         group: HelpGroup::MovingAround,
-        keys: "Alt+Left",
-        what: "Back up one level in Window rules",
-        binds: &["Alt+Left"],
-    },
-    HelpLine {
-        group: HelpGroup::Changes,
-        keys: "Ctrl+Z",
-        what: "Undo the latest change",
-        binds: &["Ctrl+Z"],
-    },
-    HelpLine {
-        group: HelpGroup::Changes,
-        keys: "Ctrl+S",
-        what: "Save now instead of a moment later",
-        binds: &["Ctrl+S"],
-    },
-    HelpLine {
-        group: HelpGroup::Changes,
-        keys: "Enter",
-        what: "While trying a display change: keep it",
+        keys: Words("Esc"),
+        what: Words("Close search or this list, or go back"),
         binds: &[],
     },
     HelpLine {
+        group: HelpGroup::MovingAround,
+        keys: Words("Alt+Left"),
+        what: Words("Back up one level in Window rules"),
+        binds: &[Words("Alt+Left")],
+    },
+    HelpLine {
         group: HelpGroup::Changes,
-        keys: "Esc",
-        what: "While trying a display change: go back",
+        keys: Words("Ctrl+Z"),
+        what: Words("Undo the latest change"),
+        binds: &[Words("Ctrl+Z")],
+    },
+    HelpLine {
+        group: HelpGroup::Changes,
+        keys: Words("Ctrl+S"),
+        what: Words("Save now instead of a moment later"),
+        binds: &[Words("Ctrl+S")],
+    },
+    HelpLine {
+        group: HelpGroup::Changes,
+        keys: Words("Enter or Esc"),
+        what: Words("While trying a display change: go back"),
         binds: &[],
     },
     HelpLine {
         group: HelpGroup::Windows,
-        keys: "Ctrl+B",
-        what: "Fold the sidebar to icons, or open it",
-        binds: &["Ctrl+B"],
+        keys: Words("Ctrl+B"),
+        what: Words("Fold the sidebar to icons, or open it"),
+        binds: &[Words("Ctrl+B")],
     },
     HelpLine {
         group: HelpGroup::Windows,
-        keys: "Ctrl+.",
-        what: "Show or hide the config beside the page",
-        binds: &["Ctrl+Period"],
+        keys: Words("Ctrl+."),
+        what: Words("Show or hide the config beside the page"),
+        binds: &[Words("Ctrl+Period")],
     },
     HelpLine {
         group: HelpGroup::Windows,
-        keys: "Ctrl+Shift+N",
-        what: "Open the config as a window of its own",
-        binds: &["Ctrl+Shift+N"],
+        keys: Words("Ctrl+Shift+N"),
+        what: Words("Open the config as a window of its own"),
+        binds: &[Words("Ctrl+Shift+N")],
     },
     HelpLine {
         group: HelpGroup::Windows,
-        keys: "Ctrl+W",
-        what: "In that window: put it back",
-        binds: &["Ctrl+W"],
+        keys: Words("Ctrl+W"),
+        what: Words("In that window: put it back"),
+        binds: &[Words("Ctrl+W")],
     },
     HelpLine {
         group: HelpGroup::Windows,
-        keys: "F1, Ctrl+?",
-        what: "This list",
-        binds: &["F1", "Ctrl+Question"],
+        keys: Words("F1, Ctrl+?"),
+        what: Words("This list"),
+        binds: &[Words("F1"), Words("Ctrl+Question")],
     },
 ];

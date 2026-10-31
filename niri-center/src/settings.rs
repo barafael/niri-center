@@ -17,28 +17,100 @@ use crate::outputs::OutputInfo;
 use crate::page::Page;
 use crate::store::{Block, Store, StoreError};
 use crate::system::SystemData;
-use crate::words::who;
+use crate::words::{Words, who};
+
+/// The headings settings are grouped under on their pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    Touchpad,
+    Tabs,
+    Keyboard,
+    Shadow,
+    Mouse,
+    FocusRing,
+    Columns,
+    Border,
+    Spacing,
+    HotCorners,
+    Blur,
+    WindowSwitcher,
+    Cursor,
+    PointerAndFocus,
+    Overview,
+    X11Apps,
+    Workspaces,
+    TabletAndTouchscreen,
+    ShortcutOverview,
+    InsertHint,
+    AllAnimations,
+    Windows,
+    Screenshots,
+    PowerButton,
+    Clipboard,
+    Background,
+}
+
+impl Section {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Touchpad => "Touchpad",
+            Self::Tabs => "Tabs",
+            Self::Keyboard => "Keyboard",
+            Self::Shadow => "Shadow",
+            Self::Mouse => "Mouse",
+            Self::FocusRing => "Focus ring",
+            Self::Columns => "Columns",
+            Self::Border => "Border",
+            Self::Spacing => "Spacing",
+            Self::HotCorners => "Hot corners",
+            Self::Blur => "Blur",
+            Self::WindowSwitcher => "Window switcher",
+            Self::Cursor => "Cursor",
+            Self::PointerAndFocus => "Pointer and focus",
+            Self::Overview => "Overview",
+            Self::X11Apps => "X11 apps",
+            Self::Workspaces => "Workspaces",
+            Self::TabletAndTouchscreen => "Tablet and touchscreen",
+            Self::ShortcutOverview => "Shortcut overview",
+            Self::InsertHint => "Insert hint",
+            Self::AllAnimations => "All animations",
+            Self::Windows => "Windows",
+            Self::Screenshots => "Screenshots",
+            Self::PowerButton => "Power button",
+            Self::Clipboard => "Clipboard",
+            Self::Background => "Background",
+        }
+    }
+}
+
+impl std::fmt::Display for Section {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(self.title())
+    }
+}
 
 /// One editable setting.
 pub struct Spec {
     pub page: Page,
-    pub section: &'static str,
-    pub label: &'static str,
+    /// The heading it is grouped under on its page; none for a page's
+    /// first, unheaded settings.
+    pub section: Option<Section>,
+    pub label: Words,
     /// One plain sentence, or empty.
-    pub help: &'static str,
+    pub help: Words,
     pub chain: &'static [Block<'static>],
     /// The node holding the value (unused for [`Kind::OnOff`]).
-    pub child: &'static str,
+    pub child: Words,
     pub kind: Kind,
     /// What niri does when the config leaves this unset, in the words the
     /// control shows (`16`, `never`). Empty when niri leaves it to the device.
     /// For [`Kind::Gradient`], the gradient a new one starts from.
-    pub default: &'static str,
+    pub default: Words,
     /// A setting that must be on for this one to matter.
     pub requires: Option<Setting>,
     /// A node beside this one that niri uses instead when it is set: a
     /// color's gradient.
-    pub overridden_by: &'static str,
+    pub overridden_by: Words,
     /// What else the row should say, worked out from the config: facts
     /// that tie this setting to others.
     pub note: Option<fn(&Store) -> Option<Note>>,
@@ -47,15 +119,15 @@ pub struct Spec {
 /// Fields most rows leave alone.
 const BASE: Spec = Spec {
     page: Page::Layout,
-    section: "",
-    label: "",
-    help: "",
+    section: None,
+    label: Words(""),
+    help: Words(""),
     chain: TOP,
-    child: "",
+    child: Words(""),
     kind: Kind::Switch,
-    default: "",
+    default: Words(""),
     requires: None,
-    overridden_by: "",
+    overridden_by: Words(""),
     note: None,
 };
 
@@ -90,7 +162,7 @@ pub enum Kind {
     /// A block's `on` / `off` flags; with neither, niri's default applies.
     OnOff,
     /// One of a few strings, written quoted: `(value, label)`.
-    Choice(&'static [(&'static str, &'static str)]),
+    Choice(&'static [(Words, Words)]),
     /// `true` or `false`, written bare: `drag false`.
     Bool,
     Integer {
@@ -105,12 +177,12 @@ pub enum Kind {
     /// The props of a gradient node: `from="#f00" to="#00f" angle=45`.
     Gradient,
     Text {
-        example: &'static str,
+        example: Words,
     },
     /// A property on a flag node: `focus-follows-mouse max-scroll-amount="0%"`.
     Prop {
-        name: &'static str,
-        example: &'static str,
+        name: Words,
+        example: Words,
     },
     /// Column widths or window heights: `proportion 0.5`, `fixed 800`.
     Sizes {
@@ -128,7 +200,7 @@ pub enum Kind {
     Output,
     /// A program or file path; offers Browse.
     File {
-        example: &'static str,
+        example: Words,
     },
     /// `screenshot-path`: a path with strftime codes, or `null`.
     Screenshot,
@@ -138,18 +210,33 @@ impl Kind {
     /// A stored value in the words its control shows: a choice's label, On
     /// or Off. `None` where the value is its own word.
     pub fn word(self, value: &str) -> Option<&'static str> {
-        #[allow(clippy::wildcard_enum_match_arm)] // only these two have words of their own
         match self {
             Self::Choice(choices) => choices
                 .iter()
-                .find(|(code, _)| *code == value)
-                .map(|(_, label)| *label),
+                .find(|(code, _)| code.as_str() == value)
+                .map(|(_, label)| label.as_str()),
             Self::Bool => match value {
                 "true" => Some("On"),
                 "false" => Some("Off"),
                 _ => None,
             },
-            _ => None,
+            // only those two have words of their own
+            Self::Switch
+            | Self::Enabled
+            | Self::OnOff
+            | Self::Integer { .. }
+            | Self::Float { .. }
+            | Self::Color
+            | Self::Gradient
+            | Self::Text { .. }
+            | Self::Prop { .. }
+            | Self::Sizes { .. }
+            | Self::Layouts
+            | Self::XkbOptions
+            | Self::CursorTheme
+            | Self::Output
+            | Self::File { .. }
+            | Self::Screenshot => None,
         }
     }
 }
@@ -229,18 +316,21 @@ const HOTKEY_OVERLAY: &[Block<'static>] = &[Block::named("hotkey-overlay")];
 const CLIPBOARD: &[Block<'static>] = &[Block::named("clipboard")];
 const XWAYLAND: &[Block<'static>] = &[Block::named("xwayland-satellite")];
 
-const ACCEL_PROFILES: &[(&str, &str)] = &[("adaptive", "Adaptive"), ("flat", "Flat")];
-const SCROLL_METHODS: &[(&str, &str)] = &[
-    ("two-finger", "Two fingers"),
-    ("edge", "Along the edge"),
-    ("on-button-down", "Button held"),
-    ("no-scroll", "Off"),
+const ACCEL_PROFILES: &[(Words, Words)] = &[
+    (Words("adaptive"), Words("Adaptive")),
+    (Words("flat"), Words("Flat")),
 ];
-const SIDES: &[(&str, &str)] = &[
-    ("left", "Left"),
-    ("right", "Right"),
-    ("top", "Top"),
-    ("bottom", "Bottom"),
+const SCROLL_METHODS: &[(Words, Words)] = &[
+    (Words("two-finger"), Words("Two fingers")),
+    (Words("edge"), Words("Along the edge")),
+    (Words("on-button-down"), Words("Button held")),
+    (Words("no-scroll"), Words("Off")),
+];
+const SIDES: &[(Words, Words)] = &[
+    (Words("left"), Words("Left")),
+    (Words("right"), Words("Right")),
+    (Words("top"), Words("Top")),
+    (Words("bottom"), Words("Bottom")),
 ];
 const THIRDS: &str = "proportion 0.33333; proportion 0.5; proportion 0.66667";
 
@@ -251,1184 +341,1184 @@ table! {
     // ---- Layout ----
     LayoutPresetColumnWidths => Spec {
         page: Page::Layout,
-        section: "Columns",
-        label: "Widths to step through",
-        help: "Switch preset column width (Mod+R) cycles through these.",
+        section: Some(Section::Columns),
+        label: Words("Widths to step through"),
+        help: Words("Switch preset column width (Mod+R) cycles through these."),
         chain: LAYOUT,
-        child: "preset-column-widths",
+        child: Words("preset-column-widths"),
         kind: Kind::Sizes {
             axis: Axis::Width,
             many: true,
         },
-        default: THIRDS,
+        default: Words(THIRDS),
         ..BASE
     },
     LayoutDefaultColumnWidth => Spec {
         page: Page::Layout,
-        section: "Columns",
-        label: "New columns open at",
-        help: "Window rules can set their own width.",
+        section: Some(Section::Columns),
+        label: Words("New columns open at"),
+        help: Words("Window rules can set their own width."),
         chain: LAYOUT,
-        child: "default-column-width",
+        child: Words("default-column-width"),
         kind: Kind::Sizes {
             axis: Axis::Width,
             many: false,
         },
-        default: "proportion 0.5",
+        default: Words("proportion 0.5"),
         ..BASE
     },
     LayoutPresetWindowHeights => Spec {
         page: Page::Layout,
-        section: "Columns",
-        label: "Heights to step through",
-        help: "Switch preset window height (Mod+Shift+R) cycles through these.",
+        section: Some(Section::Columns),
+        label: Words("Heights to step through"),
+        help: Words("Switch preset window height (Mod+Shift+R) cycles through these."),
         chain: LAYOUT,
-        child: "preset-window-heights",
+        child: Words("preset-window-heights"),
         kind: Kind::Sizes {
             axis: Axis::Height,
             many: true,
         },
-        default: THIRDS,
+        default: Words(THIRDS),
         ..BASE
     },
     LayoutCenterFocusedColumn => Spec {
         page: Page::Layout,
-        section: "Columns",
-        label: "Center the focused column",
+        section: Some(Section::Columns),
+        label: Words("Center the focused column"),
         chain: LAYOUT,
-        child: "center-focused-column",
+        child: Words("center-focused-column"),
         kind: Kind::Choice(&[
-            ("never", "Never"),
-            ("always", "Always"),
-            ("on-overflow", "When it does not fit"),
+            (Words("never"), Words("Never")),
+            (Words("always"), Words("Always")),
+            (Words("on-overflow"), Words("When it does not fit")),
         ]),
-        default: "never",
+        default: Words("never"),
         ..BASE
     },
     LayoutAlwaysCenterSingleColumn => Spec {
         page: Page::Layout,
-        section: "Columns",
-        label: "Center a lone column",
+        section: Some(Section::Columns),
+        label: Words("Center a lone column"),
         chain: LAYOUT,
-        child: "always-center-single-column",
+        child: Words("always-center-single-column"),
         ..BASE
     },
     LayoutEmptyWorkspaceAboveFirst => Spec {
         page: Page::Workspaces,
-        section: "Workspaces",
-        label: "Keep an empty workspace above the first",
+        section: Some(Section::Workspaces),
+        label: Words("Keep an empty workspace above the first"),
         chain: LAYOUT,
-        child: "empty-workspace-above-first",
+        child: Words("empty-workspace-above-first"),
         ..BASE
     },
     LayoutDefaultColumnDisplay => Spec {
         page: Page::Layout,
-        section: "Columns",
-        label: "New columns show their windows",
+        section: Some(Section::Columns),
+        label: Words("New columns show their windows"),
         chain: LAYOUT,
-        child: "default-column-display",
-        kind: Kind::Choice(&[("normal", "Stacked"), ("tabbed", "As tabs")]),
-        default: "normal",
+        child: Words("default-column-display"),
+        kind: Kind::Choice(&[(Words("normal"), Words("Stacked")), (Words("tabbed"), Words("As tabs"))]),
+        default: Words("normal"),
         ..BASE
     },
     LayoutGaps => Spec {
         page: Page::Layout,
-        section: "Spacing",
-        label: "Gaps",
-        help: "Space between windows and around the screen edge, in logical pixels.",
+        section: Some(Section::Spacing),
+        label: Words("Gaps"),
+        help: Words("Space between windows and around the screen edge, in logical pixels."),
         chain: LAYOUT,
-        child: "gaps",
+        child: Words("gaps"),
         kind: Kind::Float {
             min: 0.0,
             max: 256.0,
         },
-        default: "16",
+        default: Words("16"),
         ..BASE
     },
     LayoutStrutsLeft => Spec {
         page: Page::Layout,
-        section: "Spacing",
-        label: "Extra space on the left",
-        help: "Room kept free at the edge, so the next column can peek in.",
+        section: Some(Section::Spacing),
+        label: Words("Extra space on the left"),
+        help: Words("Room kept free at the edge, so the next column can peek in."),
         chain: STRUTS,
-        child: "left",
+        child: Words("left"),
         kind: Kind::Integer { min: 0, max: 2000 },
-        default: "0",
+        default: Words("0"),
         ..BASE
     },
     LayoutStrutsRight => Spec {
         page: Page::Layout,
-        section: "Spacing",
-        label: "Extra space on the right",
+        section: Some(Section::Spacing),
+        label: Words("Extra space on the right"),
         chain: STRUTS,
-        child: "right",
+        child: Words("right"),
         kind: Kind::Integer { min: 0, max: 2000 },
-        default: "0",
+        default: Words("0"),
         ..BASE
     },
     LayoutStrutsTop => Spec {
         page: Page::Layout,
-        section: "Spacing",
-        label: "Extra space at the top",
+        section: Some(Section::Spacing),
+        label: Words("Extra space at the top"),
         chain: STRUTS,
-        child: "top",
+        child: Words("top"),
         kind: Kind::Integer { min: 0, max: 2000 },
-        default: "0",
+        default: Words("0"),
         ..BASE
     },
     LayoutStrutsBottom => Spec {
         page: Page::Layout,
-        section: "Spacing",
-        label: "Extra space at the bottom",
+        section: Some(Section::Spacing),
+        label: Words("Extra space at the bottom"),
         chain: STRUTS,
-        child: "bottom",
+        child: Words("bottom"),
         kind: Kind::Integer { min: 0, max: 2000 },
-        default: "0",
+        default: Words("0"),
         ..BASE
     },
     LayoutFocusRing => Spec {
         page: Page::Layout,
-        section: "Focus ring",
-        label: "Focus ring",
-        help: "Drawn around the focused window, behind it.",
+        section: Some(Section::FocusRing),
+        label: Words("Focus ring"),
+        help: Words("Drawn around the focused window, behind it."),
         chain: FOCUS_RING,
         kind: Kind::OnOff,
-        default: "on",
+        default: Words("on"),
         note: Some(urgency_note),
         ..BASE
     },
     LayoutFocusRingWidth => Spec {
         page: Page::Layout,
-        section: "Focus ring",
-        label: "Width",
+        section: Some(Section::FocusRing),
+        label: Words("Width"),
         chain: FOCUS_RING,
-        child: "width",
+        child: Words("width"),
         kind: Kind::Integer { min: 0, max: 64 },
-        default: "4",
+        default: Words("4"),
         requires: Some(Setting::LayoutFocusRing),
         ..BASE
     },
     LayoutFocusRingActiveColor => Spec {
         page: Page::Layout,
-        section: "Focus ring",
-        label: "Active color",
+        section: Some(Section::FocusRing),
+        label: Words("Active color"),
         chain: FOCUS_RING,
-        child: "active-color",
+        child: Words("active-color"),
         kind: Kind::Color,
-        default: "#7fc8ff",
+        default: Words("#7fc8ff"),
         requires: Some(Setting::LayoutFocusRing),
-        overridden_by: "active-gradient",
+        overridden_by: Words("active-gradient"),
         ..BASE
     },
     LayoutFocusRingActiveGradient => Spec {
         page: Page::Layout,
-        section: "Focus ring",
-        label: "Active gradient",
-        help: "Used instead of the active color when set.",
+        section: Some(Section::FocusRing),
+        label: Words("Active gradient"),
+        help: Words("Used instead of the active color when set."),
         chain: FOCUS_RING,
-        child: "active-gradient",
+        child: Words("active-gradient"),
         kind: Kind::Gradient,
-        default: "from=\"#80c8ff\" to=\"#bbddff\" angle=45",
+        default: Words("from=\"#80c8ff\" to=\"#bbddff\" angle=45"),
         requires: Some(Setting::LayoutFocusRing),
         ..BASE
     },
     LayoutFocusRingInactiveColor => Spec {
         page: Page::Layout,
-        section: "Focus ring",
-        label: "Inactive color",
-        help: "Used on outputs that do not have focus.",
+        section: Some(Section::FocusRing),
+        label: Words("Inactive color"),
+        help: Words("Used on outputs that do not have focus."),
         chain: FOCUS_RING,
-        child: "inactive-color",
+        child: Words("inactive-color"),
         kind: Kind::Color,
-        default: "#505050",
+        default: Words("#505050"),
         requires: Some(Setting::LayoutFocusRing),
-        overridden_by: "inactive-gradient",
+        overridden_by: Words("inactive-gradient"),
         ..BASE
     },
     LayoutFocusRingUrgentColor => Spec {
         page: Page::Layout,
-        section: "Focus ring",
-        label: "Urgent color",
-        help: "For windows that ask for attention.",
+        section: Some(Section::FocusRing),
+        label: Words("Urgent color"),
+        help: Words("For windows that ask for attention."),
         chain: FOCUS_RING,
-        child: "urgent-color",
+        child: Words("urgent-color"),
         kind: Kind::Color,
-        default: "#9b0000",
+        default: Words("#9b0000"),
         requires: Some(Setting::LayoutFocusRing),
-        overridden_by: "urgent-gradient",
+        overridden_by: Words("urgent-gradient"),
         ..BASE
     },
     LayoutBorder => Spec {
         page: Page::Layout,
-        section: "Border",
-        label: "Border",
-        help: "Like the focus ring, but on every window and taking up space.",
+        section: Some(Section::Border),
+        label: Words("Border"),
+        help: Words("Like the focus ring, but on every window and taking up space."),
         chain: BORDER,
         kind: Kind::OnOff,
-        default: "off",
+        default: Words("off"),
         note: Some(urgency_note),
         ..BASE
     },
     LayoutBorderWidth => Spec {
         page: Page::Layout,
-        section: "Border",
-        label: "Width",
+        section: Some(Section::Border),
+        label: Words("Width"),
         chain: BORDER,
-        child: "width",
+        child: Words("width"),
         kind: Kind::Integer { min: 0, max: 64 },
-        default: "4",
+        default: Words("4"),
         requires: Some(Setting::LayoutBorder),
         ..BASE
     },
     LayoutBorderActiveColor => Spec {
         page: Page::Layout,
-        section: "Border",
-        label: "Active color",
+        section: Some(Section::Border),
+        label: Words("Active color"),
         chain: BORDER,
-        child: "active-color",
+        child: Words("active-color"),
         kind: Kind::Color,
-        default: "#ffc87f",
+        default: Words("#ffc87f"),
         requires: Some(Setting::LayoutBorder),
-        overridden_by: "active-gradient",
+        overridden_by: Words("active-gradient"),
         ..BASE
     },
     LayoutBorderActiveGradient => Spec {
         page: Page::Layout,
-        section: "Border",
-        label: "Active gradient",
-        help: "Used instead of the active color when set.",
+        section: Some(Section::Border),
+        label: Words("Active gradient"),
+        help: Words("Used instead of the active color when set."),
         chain: BORDER,
-        child: "active-gradient",
+        child: Words("active-gradient"),
         kind: Kind::Gradient,
-        default: "from=\"#ffbb66\" to=\"#ffc880\" angle=45",
+        default: Words("from=\"#ffbb66\" to=\"#ffc880\" angle=45"),
         requires: Some(Setting::LayoutBorder),
         ..BASE
     },
     LayoutBorderInactiveColor => Spec {
         page: Page::Layout,
-        section: "Border",
-        label: "Inactive color",
+        section: Some(Section::Border),
+        label: Words("Inactive color"),
         chain: BORDER,
-        child: "inactive-color",
+        child: Words("inactive-color"),
         kind: Kind::Color,
-        default: "#505050",
+        default: Words("#505050"),
         requires: Some(Setting::LayoutBorder),
-        overridden_by: "inactive-gradient",
+        overridden_by: Words("inactive-gradient"),
         ..BASE
     },
     LayoutBorderUrgentColor => Spec {
         page: Page::Layout,
-        section: "Border",
-        label: "Urgent color",
-        help: "For windows that ask for attention.",
+        section: Some(Section::Border),
+        label: Words("Urgent color"),
+        help: Words("For windows that ask for attention."),
         chain: BORDER,
-        child: "urgent-color",
+        child: Words("urgent-color"),
         kind: Kind::Color,
-        default: "#9b0000",
+        default: Words("#9b0000"),
         requires: Some(Setting::LayoutBorder),
-        overridden_by: "urgent-gradient",
+        overridden_by: Words("urgent-gradient"),
         ..BASE
     },
     LayoutShadow => Spec {
         page: Page::Layout,
-        section: "Shadow",
-        label: "Shadow",
+        section: Some(Section::Shadow),
+        label: Words("Shadow"),
         chain: SHADOW,
         kind: Kind::OnOff,
-        default: "off",
+        default: Words("off"),
         ..BASE
     },
     LayoutShadowSoftness => Spec {
         page: Page::Layout,
-        section: "Shadow",
-        label: "Softness",
-        help: "Blur radius in logical pixels.",
+        section: Some(Section::Shadow),
+        label: Words("Softness"),
+        help: Words("Blur radius in logical pixels."),
         chain: SHADOW,
-        child: "softness",
+        child: Words("softness"),
         kind: Kind::Integer { min: 0, max: 256 },
-        default: "30",
+        default: Words("30"),
         requires: Some(Setting::LayoutShadow),
         ..BASE
     },
     LayoutShadowSpread => Spec {
         page: Page::Layout,
-        section: "Shadow",
-        label: "Spread",
+        section: Some(Section::Shadow),
+        label: Words("Spread"),
         chain: SHADOW,
-        child: "spread",
+        child: Words("spread"),
         kind: Kind::Integer { min: 0, max: 256 },
-        default: "5",
+        default: Words("5"),
         requires: Some(Setting::LayoutShadow),
         ..BASE
     },
     LayoutShadowColor => Spec {
         page: Page::Layout,
-        section: "Shadow",
-        label: "Color",
+        section: Some(Section::Shadow),
+        label: Words("Color"),
         chain: SHADOW,
-        child: "color",
+        child: Words("color"),
         kind: Kind::Color,
-        default: "#00000077",
+        default: Words("#00000077"),
         requires: Some(Setting::LayoutShadow),
         ..BASE
     },
     LayoutShadowInactiveColor => Spec {
         page: Page::Layout,
-        section: "Shadow",
-        label: "Color of unfocused windows",
+        section: Some(Section::Shadow),
+        label: Words("Color of unfocused windows"),
         chain: SHADOW,
-        child: "inactive-color",
+        child: Words("inactive-color"),
         kind: Kind::Color,
-        default: "the same color",
+        default: Words("the same color"),
         requires: Some(Setting::LayoutShadow),
         ..BASE
     },
     LayoutShadowDrawBehindWindow => Spec {
         page: Page::Layout,
-        section: "Shadow",
-        label: "Draw behind the window too",
-        help: "For windows with see-through corners of their own.",
+        section: Some(Section::Shadow),
+        label: Words("Draw behind the window too"),
+        help: Words("For windows with see-through corners of their own."),
         chain: SHADOW,
-        child: "draw-behind-window",
+        child: Words("draw-behind-window"),
         kind: Kind::Bool,
-        default: "false",
+        default: Words("false"),
         requires: Some(Setting::LayoutShadow),
         ..BASE
     },
     LayoutTabIndicator => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Tab indicator",
-        help: "The strip beside a column that shows its windows as tabs.",
+        section: Some(Section::Tabs),
+        label: Words("Tab indicator"),
+        help: Words("The strip beside a column that shows its windows as tabs."),
         chain: TABS,
         kind: Kind::OnOff,
-        default: "on",
+        default: Words("on"),
         ..BASE
     },
     LayoutTabIndicatorHideWhenSingleTab => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Hide it for a single tab",
+        section: Some(Section::Tabs),
+        label: Words("Hide it for a single tab"),
         chain: TABS,
-        child: "hide-when-single-tab",
+        child: Words("hide-when-single-tab"),
         requires: Some(Setting::LayoutTabIndicator),
         ..BASE
     },
     LayoutTabIndicatorPlaceWithinColumn => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Draw it inside the column",
+        section: Some(Section::Tabs),
+        label: Words("Draw it inside the column"),
         chain: TABS,
-        child: "place-within-column",
+        child: Words("place-within-column"),
         requires: Some(Setting::LayoutTabIndicator),
         ..BASE
     },
     LayoutTabIndicatorPosition => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Side",
+        section: Some(Section::Tabs),
+        label: Words("Side"),
         chain: TABS,
-        child: "position",
+        child: Words("position"),
         kind: Kind::Choice(SIDES),
-        default: "left",
+        default: Words("left"),
         requires: Some(Setting::LayoutTabIndicator),
         ..BASE
     },
     LayoutTabIndicatorWidth => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Width",
+        section: Some(Section::Tabs),
+        label: Words("Width"),
         chain: TABS,
-        child: "width",
+        child: Words("width"),
         kind: Kind::Integer { min: 0, max: 64 },
-        default: "4",
+        default: Words("4"),
         requires: Some(Setting::LayoutTabIndicator),
         ..BASE
     },
     LayoutTabIndicatorGap => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Gap to the window",
+        section: Some(Section::Tabs),
+        label: Words("Gap to the window"),
         chain: TABS,
-        child: "gap",
+        child: Words("gap"),
         kind: Kind::Float {
             min: -64.0,
             max: 64.0,
         },
-        default: "5",
+        default: Words("5"),
         requires: Some(Setting::LayoutTabIndicator),
         ..BASE
     },
     LayoutTabIndicatorCornerRadius => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Corner radius",
+        section: Some(Section::Tabs),
+        label: Words("Corner radius"),
         chain: TABS,
-        child: "corner-radius",
+        child: Words("corner-radius"),
         kind: Kind::Float {
             min: 0.0,
             max: 64.0,
         },
-        default: "0",
+        default: Words("0"),
         requires: Some(Setting::LayoutTabIndicator),
         ..BASE
     },
     LayoutTabIndicatorActiveColor => Spec {
         page: Page::Layout,
-        section: "Tabs",
-        label: "Active color",
+        section: Some(Section::Tabs),
+        label: Words("Active color"),
         chain: TABS,
-        child: "active-color",
+        child: Words("active-color"),
         kind: Kind::Color,
-        default: "the focus ring's",
+        default: Words("the focus ring's"),
         requires: Some(Setting::LayoutTabIndicator),
-        overridden_by: "active-gradient",
+        overridden_by: Words("active-gradient"),
         ..BASE
     },
     LayoutInsertHint => Spec {
         page: Page::Layout,
-        section: "Insert hint",
-        label: "Insert hint",
-        help: "Shows where a dragged window will land.",
+        section: Some(Section::InsertHint),
+        label: Words("Insert hint"),
+        help: Words("Shows where a dragged window will land."),
         chain: INSERT_HINT,
         kind: Kind::OnOff,
-        default: "on",
+        default: Words("on"),
         ..BASE
     },
     LayoutInsertHintColor => Spec {
         page: Page::Layout,
-        section: "Insert hint",
-        label: "Color",
+        section: Some(Section::InsertHint),
+        label: Words("Color"),
         chain: INSERT_HINT,
-        child: "color",
+        child: Words("color"),
         kind: Kind::Color,
-        default: "#7fc8ff80",
+        default: Words("#7fc8ff80"),
         requires: Some(Setting::LayoutInsertHint),
         ..BASE
     },
     LayoutBackgroundColor => Spec {
         page: Page::Layout,
-        section: "Background",
-        label: "Workspace background",
-        help: "Shown where no window or wallpaper covers the workspace.",
+        section: Some(Section::Background),
+        label: Words("Workspace background"),
+        help: Words("Shown where no window or wallpaper covers the workspace."),
         chain: LAYOUT,
-        child: "background-color",
+        child: Words("background-color"),
         kind: Kind::Color,
-        default: "#404040",
+        default: Words("#404040"),
         ..BASE
     },
     // ---- Input ----
     InputKeyboardXkbLayout => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Layouts",
-        help: "The first one is active at startup. With none, niri uses the system layout.",
+        section: Some(Section::Keyboard),
+        label: Words("Layouts"),
+        help: Words("The first one is active at startup. With none, niri uses the system layout."),
         chain: XKB,
-        child: "layout",
+        child: Words("layout"),
         kind: Kind::Layouts,
         ..BASE
     },
     InputKeyboardXkbVariant => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Variants",
-        help: "One per layout, in the same order, comma separated.",
+        section: Some(Section::Keyboard),
+        label: Words("Variants"),
+        help: Words("One per layout, in the same order, comma separated."),
         chain: XKB,
-        child: "variant",
+        child: Words("variant"),
         kind: Kind::Text {
-            example: "nodeadkeys",
+            example: Words("nodeadkeys"),
         },
         ..BASE
     },
     InputKeyboardXkbOptions => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Options",
-        help: "For example a key that switches layouts.",
+        section: Some(Section::Keyboard),
+        label: Words("Options"),
+        help: Words("For example a key that switches layouts."),
         chain: XKB,
-        child: "options",
+        child: Words("options"),
         kind: Kind::XkbOptions,
         ..BASE
     },
     InputModKey => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Mod key",
-        help: "The key that Mod stands for in your shortcuts.",
+        section: Some(Section::Keyboard),
+        label: Words("Mod key"),
+        help: Words("The key that Mod stands for in your shortcuts."),
         chain: INPUT,
-        child: "mod-key",
+        child: Words("mod-key"),
         kind: Kind::Choice(&[
-            ("Super", "Super"),
-            ("Alt", "Alt"),
-            ("Ctrl", "Ctrl"),
-            ("Mod3", "Mod3"),
-            ("Mod5", "Mod5"),
+            (Words("Super"), Words("Super")),
+            (Words("Alt"), Words("Alt")),
+            (Words("Ctrl"), Words("Ctrl")),
+            (Words("Mod3"), Words("Mod3")),
+            (Words("Mod5"), Words("Mod5")),
         ]),
-        default: "Super",
+        default: Words("Super"),
         ..BASE
     },
     InputKeyboardRepeatDelay => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Repeat delay",
-        help: "Milliseconds a key is held before it repeats.",
+        section: Some(Section::Keyboard),
+        label: Words("Repeat delay"),
+        help: Words("Milliseconds a key is held before it repeats."),
         chain: KEYBOARD,
-        child: "repeat-delay",
+        child: Words("repeat-delay"),
         kind: Kind::Integer {
             min: 100,
             max: 2000,
         },
-        default: "600",
+        default: Words("600"),
         ..BASE
     },
     InputKeyboardRepeatRate => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Repeat rate",
-        help: "Characters per second while a key repeats.",
+        section: Some(Section::Keyboard),
+        label: Words("Repeat rate"),
+        help: Words("Characters per second while a key repeats."),
         chain: KEYBOARD,
-        child: "repeat-rate",
+        child: Words("repeat-rate"),
         kind: Kind::Integer { min: 1, max: 200 },
-        default: "25",
+        default: Words("25"),
         ..BASE
     },
     InputKeyboardNumlock => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Turn on Num Lock at startup",
+        section: Some(Section::Keyboard),
+        label: Words("Turn on Num Lock at startup"),
         chain: KEYBOARD,
-        child: "numlock",
+        child: Words("numlock"),
         ..BASE
     },
     InputKeyboardTrackLayout => Spec {
         page: Page::Input,
-        section: "Keyboard",
-        label: "Remember the layout",
+        section: Some(Section::Keyboard),
+        label: Words("Remember the layout"),
         chain: KEYBOARD,
-        child: "track-layout",
-        kind: Kind::Choice(&[("global", "For all windows"), ("window", "Per window")]),
-        default: "global",
+        child: Words("track-layout"),
+        kind: Kind::Choice(&[(Words("global"), Words("For all windows")), (Words("window"), Words("Per window"))]),
+        default: Words("global"),
         ..BASE
     },
     InputTouchpad => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Touchpad",
+        section: Some(Section::Touchpad),
+        label: Words("Touchpad"),
         chain: TOUCHPAD,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     InputTouchpadTap => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Tap to click",
+        section: Some(Section::Touchpad),
+        label: Words("Tap to click"),
         chain: TOUCHPAD,
-        child: "tap",
+        child: Words("tap"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadNaturalScroll => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Natural scrolling",
-        help: "Content follows your fingers.",
+        section: Some(Section::Touchpad),
+        label: Words("Natural scrolling"),
+        help: Words("Content follows your fingers."),
         chain: TOUCHPAD,
-        child: "natural-scroll",
+        child: Words("natural-scroll"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadDwt => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Ignore the touchpad while typing",
+        section: Some(Section::Touchpad),
+        label: Words("Ignore the touchpad while typing"),
         chain: TOUCHPAD,
-        child: "dwt",
+        child: Words("dwt"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadDwtp => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Ignore the touchpad while the pointing stick moves",
+        section: Some(Section::Touchpad),
+        label: Words("Ignore the touchpad while the pointing stick moves"),
         chain: TOUCHPAD,
-        child: "dwtp",
+        child: Words("dwtp"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadDrag => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Tap and drag",
-        help: "Tap, then keep the finger down to drag.",
+        section: Some(Section::Touchpad),
+        label: Words("Tap and drag"),
+        help: Words("Tap, then keep the finger down to drag."),
         chain: TOUCHPAD,
-        child: "drag",
+        child: Words("drag"),
         kind: Kind::Bool,
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadDragLock => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Keep dragging after lifting the finger",
+        section: Some(Section::Touchpad),
+        label: Words("Keep dragging after lifting the finger"),
         chain: TOUCHPAD,
-        child: "drag-lock",
+        child: Words("drag-lock"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadAccelSpeed => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Pointer speed",
-        help: "From -1 (slowest) to 1 (fastest).",
+        section: Some(Section::Touchpad),
+        label: Words("Pointer speed"),
+        help: Words("From -1 (slowest) to 1 (fastest)."),
         chain: TOUCHPAD,
-        child: "accel-speed",
+        child: Words("accel-speed"),
         kind: Kind::Float {
             min: -1.0,
             max: 1.0,
         },
-        default: "0",
+        default: Words("0"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadAccelProfile => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Acceleration",
+        section: Some(Section::Touchpad),
+        label: Words("Acceleration"),
         chain: TOUCHPAD,
-        child: "accel-profile",
+        child: Words("accel-profile"),
         kind: Kind::Choice(ACCEL_PROFILES),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadScrollMethod => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Scrolling",
+        section: Some(Section::Touchpad),
+        label: Words("Scrolling"),
         chain: TOUCHPAD,
-        child: "scroll-method",
+        child: Words("scroll-method"),
         kind: Kind::Choice(SCROLL_METHODS),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadScrollFactor => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Scroll speed",
-        help: "Multiplies how far each swipe scrolls.",
+        section: Some(Section::Touchpad),
+        label: Words("Scroll speed"),
+        help: Words("Multiplies how far each swipe scrolls."),
         chain: TOUCHPAD,
-        child: "scroll-factor",
+        child: Words("scroll-factor"),
         kind: Kind::Float {
             min: 0.0,
             max: 10.0,
         },
-        default: "1",
+        default: Words("1"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadTapButtonMap => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Tapping with more fingers",
-        help: "Which click a two- or three-finger tap makes.",
+        section: Some(Section::Touchpad),
+        label: Words("Tapping with more fingers"),
+        help: Words("Which click a two- or three-finger tap makes."),
         chain: TOUCHPAD,
-        child: "tap-button-map",
+        child: Words("tap-button-map"),
         kind: Kind::Choice(&[
-            ("left-right-middle", "2 fingers right, 3 middle"),
-            ("left-middle-right", "2 fingers middle, 3 right"),
+            (Words("left-right-middle"), Words("2 fingers right, 3 middle")),
+            (Words("left-middle-right"), Words("2 fingers middle, 3 right")),
         ]),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadClickMethod => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Right-click by",
+        section: Some(Section::Touchpad),
+        label: Words("Right-click by"),
         chain: TOUCHPAD,
-        child: "click-method",
+        child: Words("click-method"),
         kind: Kind::Choice(&[
-            ("button-areas", "Bottom right corner"),
-            ("clickfinger", "Two fingers"),
+            (Words("button-areas"), Words("Bottom right corner")),
+            (Words("clickfinger"), Words("Two fingers")),
         ]),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadLeftHanded => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Left-handed",
-        help: "Swaps the left and right buttons.",
+        section: Some(Section::Touchpad),
+        label: Words("Left-handed"),
+        help: Words("Swaps the left and right buttons."),
         chain: TOUCHPAD,
-        child: "left-handed",
+        child: Words("left-handed"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadMiddleEmulation => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Middle-click by pressing left and right together",
+        section: Some(Section::Touchpad),
+        label: Words("Middle-click by pressing left and right together"),
         chain: TOUCHPAD,
-        child: "middle-emulation",
+        child: Words("middle-emulation"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputTouchpadDisabledOnExternalMouse => Spec {
         page: Page::Input,
-        section: "Touchpad",
-        label: "Turn off while a mouse is connected",
+        section: Some(Section::Touchpad),
+        label: Words("Turn off while a mouse is connected"),
         chain: TOUCHPAD,
-        child: "disabled-on-external-mouse",
+        child: Words("disabled-on-external-mouse"),
         requires: Some(Setting::InputTouchpad),
         ..BASE
     },
     InputMouseNaturalScroll => Spec {
         page: Page::Input,
-        section: "Mouse",
-        label: "Natural scrolling",
+        section: Some(Section::Mouse),
+        label: Words("Natural scrolling"),
         chain: MOUSE,
-        child: "natural-scroll",
+        child: Words("natural-scroll"),
         ..BASE
     },
     InputMouseAccelSpeed => Spec {
         page: Page::Input,
-        section: "Mouse",
-        label: "Pointer speed",
-        help: "From -1 (slowest) to 1 (fastest).",
+        section: Some(Section::Mouse),
+        label: Words("Pointer speed"),
+        help: Words("From -1 (slowest) to 1 (fastest)."),
         chain: MOUSE,
-        child: "accel-speed",
+        child: Words("accel-speed"),
         kind: Kind::Float {
             min: -1.0,
             max: 1.0,
         },
-        default: "0",
+        default: Words("0"),
         ..BASE
     },
     InputMouseAccelProfile => Spec {
         page: Page::Input,
-        section: "Mouse",
-        label: "Acceleration",
+        section: Some(Section::Mouse),
+        label: Words("Acceleration"),
         chain: MOUSE,
-        child: "accel-profile",
+        child: Words("accel-profile"),
         kind: Kind::Choice(ACCEL_PROFILES),
         ..BASE
     },
     InputMouseScrollFactor => Spec {
         page: Page::Input,
-        section: "Mouse",
-        label: "Scroll speed",
-        help: "Multiplies how far each wheel step scrolls.",
+        section: Some(Section::Mouse),
+        label: Words("Scroll speed"),
+        help: Words("Multiplies how far each wheel step scrolls."),
         chain: MOUSE,
-        child: "scroll-factor",
+        child: Words("scroll-factor"),
         kind: Kind::Float {
             min: 0.0,
             max: 10.0,
         },
-        default: "1",
+        default: Words("1"),
         ..BASE
     },
     InputMouseLeftHanded => Spec {
         page: Page::Input,
-        section: "Mouse",
-        label: "Left-handed",
-        help: "Swaps the left and right buttons.",
+        section: Some(Section::Mouse),
+        label: Words("Left-handed"),
+        help: Words("Swaps the left and right buttons."),
         chain: MOUSE,
-        child: "left-handed",
+        child: Words("left-handed"),
         ..BASE
     },
     InputMouseMiddleEmulation => Spec {
         page: Page::Input,
-        section: "Mouse",
-        label: "Middle-click by pressing left and right together",
+        section: Some(Section::Mouse),
+        label: Words("Middle-click by pressing left and right together"),
         chain: MOUSE,
-        child: "middle-emulation",
+        child: Words("middle-emulation"),
         ..BASE
     },
     InputTabletMapToOutput => Spec {
         page: Page::Input,
-        section: "Tablet and touchscreen",
-        label: "The tablet covers",
+        section: Some(Section::TabletAndTouchscreen),
+        label: Words("The tablet covers"),
         chain: TABLET,
-        child: "map-to-output",
+        child: Words("map-to-output"),
         kind: Kind::Output,
-        default: "every display",
+        default: Words("every display"),
         ..BASE
     },
     InputTouchMapToOutput => Spec {
         page: Page::Input,
-        section: "Tablet and touchscreen",
-        label: "The touchscreen is",
+        section: Some(Section::TabletAndTouchscreen),
+        label: Words("The touchscreen is"),
         chain: TOUCH,
-        child: "map-to-output",
+        child: Words("map-to-output"),
         kind: Kind::Output,
-        default: "built-in",
+        default: Words("built-in"),
         ..BASE
     },
     InputFocusFollowsMouse => Spec {
         page: Page::Cursor,
-        section: "Pointer and focus",
-        label: "Focus follows the pointer",
+        section: Some(Section::PointerAndFocus),
+        label: Words("Focus follows the pointer"),
         chain: INPUT,
-        child: "focus-follows-mouse",
+        child: Words("focus-follows-mouse"),
         ..BASE
     },
     InputFocusFollowsMouseMaxScrollAmount => Spec {
         page: Page::Cursor,
-        section: "Pointer and focus",
-        label: "How far focusing may scroll",
-        help: "At 0% only fully visible windows take focus; the view never moves.",
+        section: Some(Section::PointerAndFocus),
+        label: Words("How far focusing may scroll"),
+        help: Words("At 0% only fully visible windows take focus; the view never moves."),
         chain: INPUT,
-        child: "focus-follows-mouse",
+        child: Words("focus-follows-mouse"),
         kind: Kind::Prop {
-            name: "max-scroll-amount",
-            example: "0%",
+            name: Words("max-scroll-amount"),
+            example: Words("0%"),
         },
-        default: "no limit",
+        default: Words("no limit"),
         requires: Some(Setting::InputFocusFollowsMouse),
         ..BASE
     },
     InputWarpMouseToFocus => Spec {
         page: Page::Cursor,
-        section: "Pointer and focus",
-        label: "Move the pointer to newly focused windows",
+        section: Some(Section::PointerAndFocus),
+        label: Words("Move the pointer to newly focused windows"),
         chain: INPUT,
-        child: "warp-mouse-to-focus",
+        child: Words("warp-mouse-to-focus"),
         ..BASE
     },
     InputWorkspaceAutoBackAndForth => Spec {
         page: Page::Workspaces,
-        section: "Workspaces",
-        label: "Switching to the current workspace goes back",
-        help: "Focusing the workspace you are on returns to the previous one.",
+        section: Some(Section::Workspaces),
+        label: Words("Switching to the current workspace goes back"),
+        help: Words("Focusing the workspace you are on returns to the previous one."),
         chain: INPUT,
-        child: "workspace-auto-back-and-forth",
+        child: Words("workspace-auto-back-and-forth"),
         ..BASE
     },
     InputDisablePowerKeyHandling => Spec {
         page: Page::Input,
-        section: "Power button",
-        label: "Leave the power button to the system",
-        help: "niri then ignores it, and logind decides what it does.",
+        section: Some(Section::PowerButton),
+        label: Words("Leave the power button to the system"),
+        help: Words("niri then ignores it, and logind decides what it does."),
         chain: INPUT,
-        child: "disable-power-key-handling",
+        child: Words("disable-power-key-handling"),
         ..BASE
     },
     CursorXcursorTheme => Spec {
         page: Page::Cursor,
-        section: "Cursor",
-        label: "Theme",
+        section: Some(Section::Cursor),
+        label: Words("Theme"),
         chain: CURSOR,
-        child: "xcursor-theme",
+        child: Words("xcursor-theme"),
         kind: Kind::CursorTheme,
-        default: "default",
+        default: Words("default"),
         ..BASE
     },
     CursorXcursorSize => Spec {
         page: Page::Cursor,
-        section: "Cursor",
-        label: "Size",
+        section: Some(Section::Cursor),
+        label: Words("Size"),
         chain: CURSOR,
-        child: "xcursor-size",
+        child: Words("xcursor-size"),
         kind: Kind::Integer { min: 8, max: 256 },
-        default: "24",
+        default: Words("24"),
         ..BASE
     },
     CursorHideWhenTyping => Spec {
         page: Page::Cursor,
-        section: "Cursor",
-        label: "Hide while typing",
+        section: Some(Section::Cursor),
+        label: Words("Hide while typing"),
         chain: CURSOR,
-        child: "hide-when-typing",
+        child: Words("hide-when-typing"),
         ..BASE
     },
     CursorHideAfterInactiveMs => Spec {
         page: Page::Cursor,
-        section: "Cursor",
-        label: "Hide after inactivity",
-        help: "Milliseconds without movement.",
+        section: Some(Section::Cursor),
+        label: Words("Hide after inactivity"),
+        help: Words("Milliseconds without movement."),
         chain: CURSOR,
-        child: "hide-after-inactive-ms",
+        child: Words("hide-after-inactive-ms"),
         kind: Kind::Integer {
             min: 0,
             max: 3_600_000,
         },
-        default: "never",
+        default: Words("never"),
         ..BASE
     },
     // ---- Animations ----
     Animations => Spec {
         page: Page::Animations,
-        section: "All animations",
-        label: "Animations",
+        section: Some(Section::AllAnimations),
+        label: Words("Animations"),
         chain: ANIMATIONS,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     AnimationsSlowdown => Spec {
         page: Page::Animations,
-        section: "All animations",
-        label: "Slowdown",
-        help: "Multiplies every duration: 2 makes them twice as slow.",
+        section: Some(Section::AllAnimations),
+        label: Words("Slowdown"),
+        help: Words("Multiplies every duration: 2 makes them twice as slow."),
         chain: ANIMATIONS,
-        child: "slowdown",
+        child: Words("slowdown"),
         kind: Kind::Float {
             min: 0.0,
             max: 100.0,
         },
-        default: "1",
+        default: Words("1"),
         requires: Some(Setting::Animations),
         ..BASE
     },
     // ---- General ----
     PreferNoCsd => Spec {
         page: Page::Environment,
-        section: "Windows",
-        label: "Ask apps to drop their own title bars",
-        help: "Apps that agree draw no title bars, and niri's ring and border then frame them rather than show through them.",
-        child: "prefer-no-csd",
+        section: Some(Section::Windows),
+        label: Words("Ask apps to drop their own title bars"),
+        help: Words("Apps that agree draw no title bars, and niri's ring and border then frame them rather than show through them."),
+        child: Words("prefer-no-csd"),
         ..BASE
     },
     GesturesHotCorners => Spec {
         page: Page::Gestures,
-        section: "Hot corners",
-        label: "Hot corners",
-        help: "Push the pointer into a corner to open the overview.",
+        section: Some(Section::HotCorners),
+        label: Words("Hot corners"),
+        help: Words("Push the pointer into a corner to open the overview."),
         chain: HOT_CORNERS,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     GesturesHotCornersTopLeft => Spec {
         page: Page::Gestures,
-        section: "Hot corners",
-        label: "Top left",
+        section: Some(Section::HotCorners),
+        label: Words("Top left"),
         chain: HOT_CORNERS,
-        child: "top-left",
+        child: Words("top-left"),
         requires: Some(Setting::GesturesHotCorners),
         note: Some(fallback_corner_note),
         ..BASE
     },
     GesturesHotCornersTopRight => Spec {
         page: Page::Gestures,
-        section: "Hot corners",
-        label: "Top right",
+        section: Some(Section::HotCorners),
+        label: Words("Top right"),
         chain: HOT_CORNERS,
-        child: "top-right",
+        child: Words("top-right"),
         requires: Some(Setting::GesturesHotCorners),
         ..BASE
     },
     GesturesHotCornersBottomLeft => Spec {
         page: Page::Gestures,
-        section: "Hot corners",
-        label: "Bottom left",
+        section: Some(Section::HotCorners),
+        label: Words("Bottom left"),
         chain: HOT_CORNERS,
-        child: "bottom-left",
+        child: Words("bottom-left"),
         requires: Some(Setting::GesturesHotCorners),
         ..BASE
     },
     GesturesHotCornersBottomRight => Spec {
         page: Page::Gestures,
-        section: "Hot corners",
-        label: "Bottom right",
+        section: Some(Section::HotCorners),
+        label: Words("Bottom right"),
         chain: HOT_CORNERS,
-        child: "bottom-right",
+        child: Words("bottom-right"),
         requires: Some(Setting::GesturesHotCorners),
         ..BASE
     },
     OverviewZoom => Spec {
         page: Page::Overview,
-        section: "Overview",
-        label: "Zoom",
-        help: "How small workspaces get in the overview.",
+        section: Some(Section::Overview),
+        label: Words("Zoom"),
+        help: Words("How small workspaces get in the overview."),
         chain: OVERVIEW,
-        child: "zoom",
+        child: Words("zoom"),
         kind: Kind::Float { min: 0.0, max: 1.0 },
-        default: "0.5",
+        default: Words("0.5"),
         ..BASE
     },
     OverviewBackdropColor => Spec {
         page: Page::Overview,
-        section: "Overview",
-        label: "Backdrop",
-        help: "Shown around the workspaces. The Displays page sets it per display.",
+        section: Some(Section::Overview),
+        label: Words("Backdrop"),
+        help: Words("Shown around the workspaces. The Displays page sets it per display."),
         chain: OVERVIEW,
-        child: "backdrop-color",
+        child: Words("backdrop-color"),
         kind: Kind::Color,
-        default: BACKDROP,
+        default: Words(BACKDROP),
         ..BASE
     },
     OverviewWorkspaceShadow => Spec {
         page: Page::Overview,
-        section: "Overview",
-        label: "Workspace shadow",
+        section: Some(Section::Overview),
+        label: Words("Workspace shadow"),
         chain: WORKSPACE_SHADOW,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     RecentWindows => Spec {
         page: Page::Overview,
-        section: "Window switcher",
-        label: "Window switcher",
-        help: "Alt+Tab and Mod+Tab show your recent windows.",
+        section: Some(Section::WindowSwitcher),
+        label: Words("Window switcher"),
+        help: Words("Alt+Tab and Mod+Tab show your recent windows."),
         chain: RECENT,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     RecentWindowsOpenDelayMs => Spec {
         page: Page::Overview,
-        section: "Window switcher",
-        label: "Delay before it shows",
-        help: "Milliseconds. A quick Alt+Tab switches without showing it.",
+        section: Some(Section::WindowSwitcher),
+        label: Words("Delay before it shows"),
+        help: Words("Milliseconds. A quick Alt+Tab switches without showing it."),
         chain: RECENT,
-        child: "open-delay-ms",
+        child: Words("open-delay-ms"),
         kind: Kind::Integer { min: 0, max: 5000 },
-        default: "150",
+        default: Words("150"),
         requires: Some(Setting::RecentWindows),
         ..BASE
     },
     RecentWindowsDebounceMs => Spec {
         page: Page::Overview,
-        section: "Window switcher",
-        label: "Time to count as recent",
-        help: "Milliseconds a window must keep focus to join the list.",
+        section: Some(Section::WindowSwitcher),
+        label: Words("Time to count as recent"),
+        help: Words("Milliseconds a window must keep focus to join the list."),
         chain: RECENT,
-        child: "debounce-ms",
+        child: Words("debounce-ms"),
         kind: Kind::Integer {
             min: 0,
             max: 10_000,
         },
-        default: "750",
+        default: Words("750"),
         requires: Some(Setting::RecentWindows),
         ..BASE
     },
     RecentWindowsHighlightActiveColor => Spec {
         page: Page::Overview,
-        section: "Window switcher",
-        label: "Highlight color",
+        section: Some(Section::WindowSwitcher),
+        label: Words("Highlight color"),
         chain: RECENT_HIGHLIGHT,
-        child: "active-color",
+        child: Words("active-color"),
         kind: Kind::Color,
-        default: "#999999ff",
+        default: Words("#999999ff"),
         requires: Some(Setting::RecentWindows),
         ..BASE
     },
     Blur => Spec {
         page: Page::Layout,
-        section: "Blur",
-        label: "Blur",
-        help: "Behind windows and panels that ask for it, and those a window rule blurs.",
+        section: Some(Section::Blur),
+        label: Words("Blur"),
+        help: Words("Behind windows and panels that ask for it, and those a window rule blurs."),
         chain: BLUR,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     BlurPasses => Spec {
         page: Page::Layout,
-        section: "Blur",
-        label: "Passes",
-        help: "More passes blur more and cost more.",
+        section: Some(Section::Blur),
+        label: Words("Passes"),
+        help: Words("More passes blur more and cost more."),
         chain: BLUR,
-        child: "passes",
+        child: Words("passes"),
         kind: Kind::Integer { min: 1, max: 8 },
-        default: "3",
+        default: Words("3"),
         requires: Some(Setting::Blur),
         ..BASE
     },
     BlurOffset => Spec {
         page: Page::Layout,
-        section: "Blur",
-        label: "Offset",
-        help: "How far each pass reaches.",
+        section: Some(Section::Blur),
+        label: Words("Offset"),
+        help: Words("How far each pass reaches."),
         chain: BLUR,
-        child: "offset",
+        child: Words("offset"),
         kind: Kind::Float {
             min: 0.0,
             max: 20.0,
         },
-        default: "3",
+        default: Words("3"),
         requires: Some(Setting::Blur),
         ..BASE
     },
     BlurNoise => Spec {
         page: Page::Layout,
-        section: "Blur",
-        label: "Noise",
-        help: "A little grain hides banding.",
+        section: Some(Section::Blur),
+        label: Words("Noise"),
+        help: Words("A little grain hides banding."),
         chain: BLUR,
-        child: "noise",
+        child: Words("noise"),
         kind: Kind::Float { min: 0.0, max: 1.0 },
-        default: "0.02",
+        default: Words("0.02"),
         requires: Some(Setting::Blur),
         ..BASE
     },
     BlurSaturation => Spec {
         page: Page::Layout,
-        section: "Blur",
-        label: "Saturation",
+        section: Some(Section::Blur),
+        label: Words("Saturation"),
         chain: BLUR,
-        child: "saturation",
+        child: Words("saturation"),
         kind: Kind::Float { min: 0.0, max: 2.0 },
-        default: "1.5",
+        default: Words("1.5"),
         requires: Some(Setting::Blur),
         ..BASE
     },
     ScreenshotPath => Spec {
         page: Page::Screenshots,
-        section: "Screenshots",
-        label: "Save screenshots to",
-        help: "Codes such as %Y-%m-%d become the date. niri creates the last folder if needed.",
-        child: "screenshot-path",
+        section: Some(Section::Screenshots),
+        label: Words("Save screenshots to"),
+        help: Words("Codes such as %Y-%m-%d become the date. niri creates the last folder if needed."),
+        child: Words("screenshot-path"),
         kind: Kind::Screenshot,
-        default: "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png",
+        default: Words("~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"),
         ..BASE
     },
     HotkeyOverlaySkipAtStartup => Spec {
         page: Page::Overview,
-        section: "Shortcut overview",
-        label: "Skip the shortcut overview at startup",
+        section: Some(Section::ShortcutOverview),
+        label: Words("Skip the shortcut overview at startup"),
         chain: HOTKEY_OVERLAY,
-        child: "skip-at-startup",
+        child: Words("skip-at-startup"),
         ..BASE
     },
     HotkeyOverlayHideNotBound => Spec {
         page: Page::Overview,
-        section: "Shortcut overview",
-        label: "Leave out actions that have no key",
+        section: Some(Section::ShortcutOverview),
+        label: Words("Leave out actions that have no key"),
         chain: HOTKEY_OVERLAY,
-        child: "hide-not-bound",
+        child: Words("hide-not-bound"),
         ..BASE
     },
     ClipboardDisablePrimary => Spec {
         page: Page::Environment,
-        section: "Clipboard",
-        label: "Turn off middle-click paste",
-        help: "Disables the primary selection.",
+        section: Some(Section::Clipboard),
+        label: Words("Turn off middle-click paste"),
+        help: Words("Disables the primary selection."),
         chain: CLIPBOARD,
-        child: "disable-primary",
+        child: Words("disable-primary"),
         ..BASE
     },
     XwaylandSatellite => Spec {
         page: Page::Environment,
-        section: "X11 apps",
-        label: "Run X11 apps",
-        help: "Through xwayland-satellite, started when an X11 app needs it.",
+        section: Some(Section::X11Apps),
+        label: Words("Run X11 apps"),
+        help: Words("Through xwayland-satellite, started when an X11 app needs it."),
         chain: XWAYLAND,
-        child: "off",
+        child: Words("off"),
         kind: Kind::Enabled,
         ..BASE
     },
     XwaylandSatellitePath => Spec {
         page: Page::Environment,
-        section: "X11 apps",
-        label: "Program",
+        section: Some(Section::X11Apps),
+        label: Words("Program"),
         chain: XWAYLAND,
-        child: "path",
+        child: Words("path"),
         kind: Kind::File {
-            example: "/usr/bin/xwayland-satellite",
+            example: Words("/usr/bin/xwayland-satellite"),
         },
-        default: "xwayland-satellite",
+        default: Words("xwayland-satellite"),
         requires: Some(Setting::XwaylandSatellite),
         ..BASE
     },
@@ -1437,15 +1527,15 @@ table! {
 /// niri's backdrop color, for the overview and for each display.
 const BACKDROP: &str = "#262626";
 
-const TRANSFORMS: &[(&str, &str)] = &[
-    ("normal", "Normal"),
-    ("90", "Turned 90 degrees"),
-    ("180", "Upside down"),
-    ("270", "Turned 270 degrees"),
-    ("flipped", "Mirrored"),
-    ("flipped-90", "Mirrored, turned 90 degrees"),
-    ("flipped-180", "Mirrored, upside down"),
-    ("flipped-270", "Mirrored, turned 270 degrees"),
+const TRANSFORMS: &[(Words, Words)] = &[
+    (Words("normal"), Words("Normal")),
+    (Words("90"), Words("Turned 90 degrees")),
+    (Words("180"), Words("Upside down")),
+    (Words("270"), Words("Turned 270 degrees")),
+    (Words("flipped"), Words("Mirrored")),
+    (Words("flipped-90"), Words("Mirrored, turned 90 degrees")),
+    (Words("flipped-180"), Words("Mirrored, upside down")),
+    (Words("flipped-270"), Words("Mirrored, turned 270 degrees")),
 ];
 
 table! {
@@ -1454,17 +1544,17 @@ table! {
     OutputSetting, OUTPUT_SETTINGS;
     Mode => Spec {
         page: Page::Displays,
-        label: "Resolution and refresh rate",
-        child: "mode",
+        label: Words("Resolution and refresh rate"),
+        child: Words("mode"),
         kind: Kind::Text {
-            example: "1920x1080@60",
+            example: Words("1920x1080@60"),
         },
         ..BASE
     },
     Scale => Spec {
         page: Page::Displays,
-        label: "Scale",
-        child: "scale",
+        label: Words("Scale"),
+        child: Words("scale"),
         kind: Kind::Float {
             min: 0.25,
             max: 10.0,
@@ -1473,32 +1563,32 @@ table! {
     },
     Transform => Spec {
         page: Page::Displays,
-        label: "Rotation",
-        child: "transform",
+        label: Words("Rotation"),
+        child: Words("transform"),
         kind: Kind::Choice(TRANSFORMS),
-        default: "normal",
+        default: Words("normal"),
         ..BASE
     },
     VariableRefreshRate => Spec {
         page: Page::Displays,
-        label: "Variable refresh rate",
-        child: "variable-refresh-rate",
+        label: Words("Variable refresh rate"),
+        child: Words("variable-refresh-rate"),
         kind: Kind::Switch,
         ..BASE
     },
     BackdropColor => Spec {
         page: Page::Displays,
-        label: "Backdrop",
-        help: "Shown around workspaces in the overview.",
-        child: "backdrop-color",
+        label: Words("Backdrop"),
+        help: Words("Shown around workspaces in the overview."),
+        child: Words("backdrop-color"),
         kind: Kind::Color,
-        default: BACKDROP,
+        default: Words(BACKDROP),
         ..BASE
     },
     Off => Spec {
         page: Page::Displays,
-        label: "Turn this display off",
-        child: "off",
+        label: Words("Turn this display off"),
+        child: Words("off"),
         kind: Kind::Switch,
         ..BASE
     },
@@ -1508,11 +1598,11 @@ table! {
 /// `output` or `workspace` block (niri 25.11).
 struct Scope {
     /// The global block the settings live in: `layout`.
-    global: &'static str,
+    global: Words,
     /// Only these of its children; all when empty.
-    children: &'static [&'static str],
+    children: &'static [Words],
     /// The blocks that can set them for themselves.
-    within: &'static [&'static str],
+    within: &'static [Words],
     /// The global block appears again inside (`output { layout { gaps } }`),
     /// or the setting stands in it directly (`output { backdrop-color }`).
     repeats_block: bool,
@@ -1520,15 +1610,15 @@ struct Scope {
 
 const SCOPES: [Scope; 2] = [
     Scope {
-        global: "layout",
+        global: Words("layout"),
         children: &[],
-        within: &["output", "workspace"],
+        within: &[Words("output"), Words("workspace")],
         repeats_block: true,
     },
     Scope {
-        global: "overview",
-        children: &["backdrop-color"],
-        within: &["output"],
+        global: Words("overview"),
+        children: &[Words("backdrop-color")],
+        within: &[Words("output")],
         repeats_block: false,
     },
 ];
@@ -1540,18 +1630,20 @@ pub fn overrides(store: &Store, chain: &[Block], child: &str) -> Vec<crate::stor
         return Vec::new();
     };
     let Some(scope) = SCOPES.iter().find(|scope| {
-        scope.global == first.name && (scope.children.is_empty() || scope.children.contains(&child))
+        scope.global.as_str() == first.name
+            && (scope.children.is_empty() || scope.children.iter().any(|name| **name == *child))
     }) else {
         return Vec::new();
     };
     let inside: Vec<Block> = if scope.repeats_block {
-        std::iter::once(Block::named(scope.global))
+        std::iter::once(Block::named(scope.global.as_str()))
             .chain(rest.iter().cloned())
             .collect()
     } else {
         rest.to_vec()
     };
-    store.overrides(scope.within, &inside, child)
+    let within: Vec<&str> = scope.within.iter().map(|name| name.as_str()).collect();
+    store.overrides(&within, &inside, child)
 }
 
 /// Where one display's settings live: its `output "<name>"` block.
@@ -1584,8 +1676,8 @@ impl Spec {
         match self.kind {
             Kind::OnOff => parts.push("on / off"),
             Kind::Prop { name, .. } => {
-                parts.push(self.child);
-                parts.push(name);
+                parts.push(self.child.as_str());
+                parts.push(name.as_str());
             }
             Kind::Switch
             | Kind::Enabled
@@ -1602,17 +1694,17 @@ impl Spec {
             | Kind::CursorTheme
             | Kind::Output
             | Kind::File { .. }
-            | Kind::Screenshot => parts.push(self.child),
+            | Kind::Screenshot => parts.push(self.child.as_str()),
         }
         parts.join(" › ")
     }
 
     pub fn read(&self, store: &Store) -> Reading {
-        read(store, self.chain, self.child, self.kind)
+        read(store, self.chain, self.child.as_str(), self.kind)
     }
 
     pub fn write(&self, store: &mut Store, reading: &Reading) -> Result<(), StoreError> {
-        write(store, self.chain, self.child, self.kind, reading)
+        write(store, self.chain, self.child.as_str(), self.kind, reading)
     }
 
     /// Whether niri uses this setting with the config as it is: an on/off
@@ -1620,10 +1712,9 @@ impl Spec {
     pub fn is_on(&self, store: &Store) -> bool {
         match self.read(store) {
             Reading::Switch(on) => on,
-            Reading::OnOff(OnOff::On) => true,
+            Reading::OnOff(OnOff::On) | Reading::Value(_) => true,
             Reading::OnOff(OnOff::Off) => false,
-            Reading::OnOff(OnOff::Default) => self.default == "on",
-            Reading::Value(_) => true,
+            Reading::OnOff(OnOff::Default) => *self.default == *"on",
         }
     }
 
@@ -1639,7 +1730,7 @@ impl Spec {
                 Reading::Value(Some(format!("{:.2}", f64::midpoint(min, max))))
             }
             Kind::Color => Reading::Value(Some("#336699".to_string())),
-            Kind::Gradient => Reading::Value(Some(self.default.to_string())),
+            Kind::Gradient | Kind::Screenshot => Reading::Value(Some(self.default.to_string())),
             Kind::Text { example } | Kind::Prop { example, .. } | Kind::File { example } => {
                 Reading::Value(Some(example.to_string()))
             }
@@ -1651,7 +1742,6 @@ impl Spec {
             Kind::XkbOptions => Reading::Value(Some("ctrl:nocaps".to_string())),
             Kind::CursorTheme => Reading::Value(Some("Adwaita".to_string())),
             Kind::Output => Reading::Value(Some("DP-1".to_string())),
-            Kind::Screenshot => Reading::Value(Some(self.default.to_string())),
         }
     }
 }
@@ -1672,7 +1762,7 @@ pub fn read(store: &Store, chain: &[Block], child: &str, kind: Kind) -> Reading 
         Kind::Prop { name, .. } => Reading::Value(
             store
                 .setting_node(chain, child)
-                .and_then(|node| node.props.iter().find(|prop| prop.name == name))
+                .and_then(|node| node.props.iter().find(|prop| prop.name == *name))
                 .map(|prop| prop.value.kind.as_str().to_string()),
         ),
         Kind::Gradient => Reading::Value(store.setting_node(chain, child).map(|node| {
@@ -1799,7 +1889,7 @@ pub fn join_sizes(entries: &[(String, String)]) -> String {
 /// A size as people say it: `1/3`, `50%`, `800 px`.
 pub fn size_label(name: &str, value: &str) -> String {
     match (name, value.parse::<f64>()) {
-        ("proportion", Ok(p)) => {
+        ("proportion", Ok(proportion)) => {
             for (fraction, label) in [
                 (1.0 / 4.0, "1/4"),
                 (1.0 / 3.0, "1/3"),
@@ -1808,11 +1898,11 @@ pub fn size_label(name: &str, value: &str) -> String {
                 (3.0 / 4.0, "3/4"),
                 (1.0, "Full"),
             ] {
-                if (p - fraction).abs() < 0.001 {
+                if (proportion - fraction).abs() < 0.001 {
                     return label.to_string();
                 }
             }
-            format!("{}%", (p * 100.0).round())
+            format!("{}%", (proportion * 100.0).round())
         }
         ("fixed", Ok(px)) => format!("{px} px"),
         _ => format!("{name} {value}"),
@@ -1833,13 +1923,13 @@ pub fn parse(kind: Kind, input: &str) -> Result<Option<String>, String> {
         Kind::Integer { min, max } => input
             .parse::<i64>()
             .ok()
-            .filter(|n| (min..=max).contains(n))
-            .map(|n| Some(n.to_string()))
+            .filter(|number| (min..=max).contains(number))
+            .map(|number| Some(number.to_string()))
             .ok_or_else(|| format!("Enter a whole number from {min} to {max}.")),
         Kind::Float { min, max } => input
             .parse::<f64>()
             .ok()
-            .filter(|n| n.is_finite() && (min..=max).contains(n))
+            .filter(|number| number.is_finite() && (min..=max).contains(number))
             // written as typed: these settings take `24` as well as `24.5`
             // (only spring props insist on a decimal point; the core writes those)
             .map(|_| Some(input.to_string()))
@@ -1859,7 +1949,7 @@ pub fn parse(kind: Kind, input: &str) -> Result<Option<String>, String> {
         Kind::Prop { .. } => input
             .strip_suffix('%')
             .and_then(|number| number.trim().parse::<f64>().ok())
-            .filter(|n| n.is_finite() && *n >= 0.0)
+            .filter(|number| number.is_finite() && *number >= 0.0)
             .map(|_| Some(input.to_string()))
             .ok_or_else(|| "Enter a percentage such as 0% or 50%.".to_string()),
         Kind::Text { .. }
@@ -1884,9 +1974,9 @@ fn parse_sizes(input: &str, many: bool) -> Result<String, String> {
     }
     for (name, value) in &entries {
         let ok = match name.as_str() {
-            "proportion" => value
-                .parse::<f64>()
-                .is_ok_and(|p| p.is_finite() && p > 0.0 && p <= 1.0),
+            "proportion" => value.parse::<f64>().is_ok_and(|proportion| {
+                proportion.is_finite() && proportion > 0.0 && proportion <= 1.0
+            }),
             "fixed" => value.parse::<u32>().is_ok_and(|px| px > 0),
             _ => false,
         };
@@ -1983,6 +2073,15 @@ impl Drafts {
     }
 }
 
+/// The settings of `page` that the config sets to something, in table
+/// order: what going back to niri's defaults for the page takes out.
+pub fn set_on(store: &Store, page: Page) -> impl Iterator<Item = Setting> + '_ {
+    Setting::ALL.iter().copied().filter(move |setting| {
+        let spec = setting.spec();
+        spec.page == page && spec.read(store) != unset(spec.kind)
+    })
+}
+
 /// What a setting reads when the config leaves it out.
 pub const fn unset(kind: Kind) -> Reading {
     match kind {
@@ -2039,7 +2138,7 @@ pub fn edit_in(
     let Some(reading) = drafts.reading(key, spec.kind, edit) else {
         return Ok(());
     };
-    write(store, chain, spec.child, spec.kind, &reading).map_err(|e| e.to_string())
+    write(store, chain, spec.child.as_str(), spec.kind, &reading).map_err(|error| error.to_string())
 }
 
 /// Whether a display other than `output` is connected and on. Turning off
@@ -2157,7 +2256,7 @@ pub fn notes(
             parent.label
         )));
     }
-    if !setting.overridden_by.is_empty() && store.is_set(chain, setting.overridden_by) {
+    if !setting.overridden_by.is_empty() && store.is_set(chain, &setting.overridden_by) {
         let instead = REGISTRY
             .iter()
             .find(|other| (other.chain, other.child) == (setting.chain, setting.overridden_by))
@@ -2165,7 +2264,7 @@ pub fn notes(
         notes.push(Note::info(format!("{instead} is used instead.")));
     }
     notes.extend(setting.note.and_then(|note| note(store)));
-    let overrides: Vec<String> = overrides(store, chain, setting.child)
+    let overrides: Vec<String> = overrides(store, chain, &setting.child)
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -2175,7 +2274,7 @@ pub fn notes(
             who(&overrides, "sets", "set")
         )));
     }
-    if let Some(file) = store.setting_file(chain, setting.child)
+    if let Some(file) = store.setting_file(chain, &setting.child)
         && let Some(owner) = managed_by(store, file)
     {
         notes.push(Note::warn(format!(
@@ -2184,7 +2283,7 @@ pub fn notes(
         )));
     }
     if setting.kind == Kind::CursorTheme
-        && let Reading::Value(Some(theme_name)) = read(store, chain, setting.child, setting.kind)
+        && let Reading::Value(Some(theme_name)) = read(store, chain, &setting.child, setting.kind)
         && !system.cursor_themes.is_empty()
         && !system.cursor_themes.contains(&theme_name)
     {
@@ -2224,8 +2323,8 @@ pub enum Writer {
 }
 
 impl std::fmt::Display for Writer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
             Self::Shell(Shell::DankMaterialShell) => "DankMaterialShell",
             Self::Shell(Shell::Noctalia) => "Noctalia",
             Self::Generator => "the program that generated it",
@@ -2286,8 +2385,9 @@ pub fn default_label(default: &str) -> String {
 /// (`Default 16`, `Default #7fc8ff`), words in parentheses like the lists
 /// (`Default (no limit)`).
 pub fn default_placeholder(default: &str) -> String {
-    let typed = default
-        .starts_with(|c: char| c.is_ascii_digit() || matches!(c, '#' | '-' | '.' | '~' | '/'));
+    let typed = default.starts_with(|character: char| {
+        character.is_ascii_digit() || matches!(character, '#' | '-' | '.' | '~' | '/')
+    });
     if typed {
         format!("{NIRI_DEFAULT} {default}")
     } else {
