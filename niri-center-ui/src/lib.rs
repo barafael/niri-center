@@ -69,21 +69,23 @@ fn app_theme(state: &App) -> Theme {
 
 /// The window: the full app, or one page alone (`--pane`).
 pub fn run(pane: Option<Page>) -> iced::Result {
-    // `niri-center` for the full app, `niri-center.<pane>` for a single
-    // pane: distinct ids let niri window rules target them separately
-    #[cfg(not(target_arch = "wasm32"))]
-    let platform_specific = window::settings::PlatformSpecific {
-        application_id: pane.map_or_else(|| "niri-center".to_string(), Page::app_id),
+    let window = window::Settings {
+        exit_on_close_request: false,
         ..Default::default()
     };
-    #[cfg(target_arch = "wasm32")]
-    let platform_specific = window::settings::PlatformSpecific::default();
-    iced::application(move || App::boot(pane), update::step, view::view)
-        .window(window::Settings {
-            platform_specific,
-            exit_on_close_request: false,
+    // `niri-center` for the full app, `niri-center.<pane>` for a single
+    // pane: distinct ids let niri window rules target them separately.
+    // iced 0.14 takes an id on Linux only, not on the BSDs.
+    #[cfg(target_os = "linux")]
+    let window = window::Settings {
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: pane.map_or_else(|| "niri-center".to_string(), Page::app_id),
             ..Default::default()
-        })
+        },
+        ..window
+    };
+    iced::application(move || App::boot(pane), update::step, view::view)
+        .window(window)
         .subscription(subscriptions::subscription)
         .title(title)
         .theme(app_theme)
