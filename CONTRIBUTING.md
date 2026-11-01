@@ -20,6 +20,7 @@ just audit         # cargo audit + cargo deny
 just ui-shots      # render every screen headlessly to target/ui-shots
 just web           # the browser demo, into target/site
 just licenses      # regenerate THIRD_PARTY_LICENSES.md
+just packages      # .deb and .rpm of the release build (cargo-deb, cargo-generate-rpm)
 ```
 
 The browser demo is the same code built for `wasm32-unknown-unknown`:
@@ -40,6 +41,29 @@ push to main.
 niri-ipc is pinned to the niri release the app targets (`=26.4.0` for niri
 26.04); bump it in lockstep with niri, then refresh the action catalog (see
 Reminders).
+
+## Releasing
+
+`.github/workflows/release.yml` builds a release in Debian 12, for x86_64
+and aarch64: a tarball, a .deb and an .rpm each. A binary needs at least the
+glibc it was linked against, and Debian 12's is older than that of any
+distribution niri 26.04 runs on. Every package is installed and started on
+Debian 12, Ubuntu 24.04, Fedora 43 and AlmaLinux 10 before the release is
+drafted.
+
+1. Set the version in `niri-center-ui/Cargo.toml`.
+2. Run the Release workflow by hand: a dry run, whose packages stay as the
+   run's artifacts to try.
+3. Tag `v<version>` and push the tag. The workflow drafts the release with
+   the packages and `SHA256SUMS`; publish it.
+4. In `dist/aur/niri-center/PKGBUILD` set `pkgver` and `pkgrel=1`, run
+   `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`, and push both to
+   the AUR's niri-center repository. `dist/aur/niri-center-git/PKGBUILD`
+   follows main by itself.
+
+The workflow fails when the binary links a library the packages don't
+name: add it to both PKGBUILDs' `depends` and to the check's list. The .deb
+and .rpm find their dependencies themselves.
 
 ## Provenance and licensing
 
