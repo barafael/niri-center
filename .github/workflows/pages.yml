@@ -37,7 +37,7 @@ jobs:
         run: |
           wasm-pack build niri-center-ui --target web --profile web \
             --no-typescript --no-pack --out-dir ../site --out-name niri-center
-          cp niri-center-ui/web/index.html site/
+          cp niri-center-ui/web/index.html dist/niri-center.svg site/
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site

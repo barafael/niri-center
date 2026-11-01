@@ -89,3 +89,8 @@ behind the app are in `docs/`.
 ## License
 
 GPL-3.0-or-later. Third-party licenses are in `THIRD_PARTY_LICENSES.md`.
+
+The icon, `dist/niri-center.svg`, is the [niri logo](https://github.com/niri-wm/niri/blob/main/docs/wiki/Name-and-Logo.md)
+by the niri project with a gear added, under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) like the original.
+niri-center is not part of the niri project.
