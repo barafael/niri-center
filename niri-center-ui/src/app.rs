@@ -293,7 +293,12 @@ impl App {
             niri_listen,
             app.ask_niri(niri::Command::Outputs),
             tasks::blocking(niri_center::start::system, Message::SystemLoaded),
+            #[cfg(target_arch = "wasm32")]
             iced::system::theme().map(Message::ModeLoaded),
+            #[cfg(not(target_arch = "wasm32"))]
+            Task::perform(niri_center::portal::scheme(), |scheme| {
+                Message::ModeLoaded(crate::theme::mode(scheme))
+            }),
             Task::perform(
                 niri_center::portal::high_contrast(),
                 Message::ContrastLoaded,

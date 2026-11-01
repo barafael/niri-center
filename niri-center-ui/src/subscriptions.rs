@@ -8,7 +8,7 @@ use niri_center::page::Page;
 
 use crate::app::App;
 use crate::message::Message;
-use crate::{keyboard, shortcuts};
+use crate::{keyboard, shortcuts, theme};
 
 /// The app's own keys and the window's size, from the raw events.
 fn app_events(
@@ -36,12 +36,19 @@ fn send(sender: &mut Sender<Message>, message: Message) -> bool {
     sender.try_send(message).is_ok()
 }
 
-/// Every later change of the desktop's contrast preference.
-fn contrast_changes() -> Subscription<Message> {
-    Subscription::run_with("desktop-contrast", |_| {
+/// Every later change of the desktop's color scheme or contrast.
+fn appearance_changes() -> Subscription<Message> {
+    use niri_center::portal::Appearance;
+    Subscription::run_with("desktop-appearance", |_| {
         stream::channel(4, |mut sender: Sender<Message>| async move {
-            niri_center::portal::watch_contrast(|high| {
-                send(&mut sender, Message::ContrastLoaded(high))
+            niri_center::portal::watch_appearance(|appearance| {
+                send(
+                    &mut sender,
+                    match appearance {
+                        Appearance::Scheme(scheme) => Message::ModeLoaded(theme::mode(scheme)),
+                        Appearance::HighContrast(high) => Message::ContrastLoaded(high),
+                    },
+                )
             })
             .await;
         })
@@ -76,6 +83,8 @@ fn found_keys(
 /// down.
 pub fn subscription(state: &App) -> Subscription<Message> {
     let mut subscriptions = vec![
+        // the browser's own; the desktop's come through the portal
+        #[cfg(target_arch = "wasm32")]
         iced::system::theme_changes().map(Message::ModeLoaded),
         // while a key is being found, a key press is that and not a search
         if state.keybinds.finding_keys {
@@ -88,7 +97,7 @@ pub fn subscription(state: &App) -> Subscription<Message> {
             iced::event::listen_with(app_events)
         },
         window::close_requests().map(|_| Message::CloseRequested),
-        contrast_changes(),
+        appearance_changes(),
     ];
     match state.page {
         Page::Windows => subscriptions.push(

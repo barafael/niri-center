@@ -192,6 +192,15 @@ pub const HIGH_CONTRAST_LIGHT: Colors = Colors {
 
 pub const ALL: [&Colors; 4] = [&DARK, &LIGHT, &HIGH_CONTRAST_DARK, &HIGH_CONTRAST_LIGHT];
 
+/// The tone the desktop's color scheme asks for.
+pub const fn mode(scheme: niri_center::portal::Scheme) -> Mode {
+    match scheme {
+        niri_center::portal::Scheme::NoPreference => Mode::None,
+        niri_center::portal::Scheme::Dark => Mode::Dark,
+        niri_center::portal::Scheme::Light => Mode::Light,
+    }
+}
+
 /// `from` moved `amount` (0–1) of the way towards `to`, alpha too.
 pub fn mix(from: Color, to: Color, amount: f32) -> Color {
     let amount = amount.clamp(0.0, 1.0);

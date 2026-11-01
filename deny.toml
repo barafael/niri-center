@@ -14,15 +14,17 @@ targets = [
 # rendering stack, with no upgraded release that fixes it:
 # - RUSTSEC-2026-0192 (ttf-parser, unmaintained): tiny, API-stable font parser
 #   pulled in by cosmic-text/fontdb; still receives security fixes upstream.
-# - RUSTSEC-2026-0370, -0371, -0372 (zvariant, zbus_names, zvariant_derive,
-#   unmaintained): merged into zbus as of 6.0 (z-galaxy/zbus#2043), which
-#   files them as informational, no vulnerability. ashpd 0.13 and iced 0.14
-#   (through mundy) still need zbus 5; drop these once both move to zbus 6.
+# Two more `cargo audit` warnings come from iced 0.14 and cargo-deny does not
+# raise them here:
+# - RUSTSEC-2026-0253 (lru 0.16, unsound `LruCache::pop`): cryoglyph 0.1 asks
+#   for lru 0.16 and calls only `pop_lru`, with plain-data keys, while the
+#   advisory needs a key whose `Drop` panics under `catch_unwind`. cryoglyph's
+#   main branch has lru 0.18.2 but also wgpu 30, which iced 0.14 cannot use.
+# - RUSTSEC-2024-0436 (paste, unmaintained): a macro crate under wgpu's metal
+#   backend, built for macOS only.
+# All three go once iced releases past 0.14.
 ignore = [
   { id = "RUSTSEC-2026-0192", reason = "unmaintained-status advisory; pinned by cosmic-text/fontdb, security fixes still shipped" },
-  { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; ashpd and iced still need zbus 5" },
-  { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; ashpd and iced still need zbus 5" },
-  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; ashpd and iced still need zbus 5" },
 ]
 
 [licenses]

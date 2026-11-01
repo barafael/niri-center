@@ -30,7 +30,8 @@ iced = { workspace = true, features = [
     "crisp",
     "web-colors",
     "thread-pool",
-    "linux-theme-detection",
+    # no linux-theme-detection: the color scheme comes from the portal with
+    # the contrast (niri_center::portal), on zbus 6 rather than zbus 5
     "x11",
     "wayland",
     "tokio",

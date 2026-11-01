@@ -30,8 +30,9 @@ tokio = { version = "1", features = ["sync", "rt"] }
 clap = { version = "4", default-features = false, features = ["std"] }
 # times in the history, and screenshot names expanded the way niri does
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# xdg-desktop-portal: the file chooser behind Browse, the contrast preference
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "file_chooser", "settings"] }
+# xdg-desktop-portal on the session bus: the file chooser behind Browse, and
+# the color scheme and contrast the desktop asks for
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy"] }
 futures-util = { version = "0.3", default-features = false }
 xkbcommon = { version = "0.9.0", default-features = false }
 
