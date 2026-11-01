@@ -14,8 +14,7 @@ makedepends=(cargo)
 checkdepends=(ttf-dejavu)
 optdepends=('vulkan-icd-loader: draw on the GPU through Vulkan rather than OpenGL or in software')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# `updpkgsums` once the tag v$pkgver is pushed: GitHub makes the tarball then
-sha256sums=('SKIP')
+sha256sums=('01634de4afa43e443d33abd52f717a0b6971bd3b419a2adb81009bcec4fbddc9')
 
 # rust-toolchain.toml pins the toolchain clippy gates with, not one the build needs
 prepare() {
