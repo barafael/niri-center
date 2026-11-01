@@ -14,8 +14,15 @@ targets = [
 # rendering stack, with no upgraded release that fixes it:
 # - RUSTSEC-2026-0192 (ttf-parser, unmaintained): tiny, API-stable font parser
 #   pulled in by cosmic-text/fontdb; still receives security fixes upstream.
+# - RUSTSEC-2026-0370, -0371, -0372 (zvariant, zbus_names, zvariant_derive,
+#   unmaintained): merged into zbus as of 6.0 (z-galaxy/zbus#2043), which
+#   files them as informational, no vulnerability. ashpd 0.13 and iced 0.14
+#   (through mundy) still need zbus 5; drop these once both move to zbus 6.
 ignore = [
   { id = "RUSTSEC-2026-0192", reason = "unmaintained-status advisory; pinned by cosmic-text/fontdb, security fixes still shipped" },
+  { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; ashpd and iced still need zbus 5" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; ashpd and iced still need zbus 5" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; ashpd and iced still need zbus 5" },
 ]
 
 [licenses]

@@ -10442,7 +10442,7 @@ SOFTWARE.
 
 Used by:
 
-- tokio v1.53.1 (https://github.com/tokio-rs/tokio)
+- tokio v1.54.1 (https://github.com/tokio-rs/tokio)
 
 ---
 
