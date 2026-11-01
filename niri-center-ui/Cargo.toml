@@ -1,6 +1,6 @@
 [package]
 name = "niri-center-ui"
-description = "Lightweight settings GUI for the niri Wayland compositor."
+description = "Settings app for the niri Wayland compositor"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -69,6 +69,51 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 [dev-dependencies]
 iced_test = "0.14.0"
 tempfile = "3"
+
+# `cargo deb -p niri-center-ui`: the package is named for the binary, not
+# the crate. $auto asks dpkg-shlibdeps, so a .deb built off Debian lacks the
+# linked libraries; wayland is opened at start, which it cannot see.
+[package.metadata.deb]
+name = "niri-center"
+maintainer = "Felin Tusun <16455996+felintusun@users.noreply.github.com>"
+copyright = "Felin Tusun"
+license-file = ["../LICENSE", "0"]
+section = "utils"
+extended-description = """\
+Settings app for the niri Wayland compositor. It changes the lines a \
+setting needs and leaves the rest of the config as written, asks \
+niri validate before every save, and keeps a history to undo from."""
+depends = "$auto, libwayland-client0"
+recommends = "niri"
+assets = [
+    ["target/release/niri-center", "usr/bin/", "755"],
+    ["../dist/*.desktop", "usr/share/applications/", "644"],
+    ["../dist/niri-center.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../README.md", "usr/share/doc/niri-center/", "644"],
+    ["../THIRD_PARTY_LICENSES.md", "usr/share/doc/niri-center/", "644"],
+]
+
+# `cargo generate-rpm -p niri-center-ui`, after a release build. Linked
+# libraries are found by reading the binary; wayland is opened at start.
+[package.metadata.generate-rpm]
+name = "niri-center"
+assets = [
+    { source = "target/release/niri-center", dest = "/usr/bin/niri-center", mode = "755" },
+    { source = "../dist/niri-center.desktop", dest = "/usr/share/applications/niri-center.desktop", mode = "644" },
+    { source = "../dist/niri-center.keybinds.desktop", dest = "/usr/share/applications/niri-center.keybinds.desktop", mode = "644" },
+    { source = "../dist/niri-center.displays.desktop", dest = "/usr/share/applications/niri-center.displays.desktop", mode = "644" },
+    { source = "../dist/niri-center.svg", dest = "/usr/share/icons/hicolor/scalable/apps/niri-center.svg", mode = "644" },
+    { source = "../README.md", dest = "/usr/share/doc/niri-center/README.md", mode = "644", doc = true },
+    { source = "../LICENSE", dest = "/usr/share/licenses/niri-center/LICENSE", mode = "644", doc = true },
+    { source = "../THIRD_PARTY_LICENSES.md", dest = "/usr/share/licenses/niri-center/THIRD_PARTY_LICENSES.md", mode = "644", doc = true },
+]
+auto-req = "builtin"
+
+[package.metadata.generate-rpm.requires]
+libwayland-client = "*"
+
+[package.metadata.generate-rpm.recommends]
+niri = "*"
 
 # wasm-pack's wasm-opt (binaryen 117) after the web profile: it must be told
 # the wasm features rustc emits, SIMD among them

@@ -57,3 +57,11 @@ licenses:
 # Optimized single-binary build for distribution.
 release:
     cargo build --release -p niri-center-ui
+
+# Debian and RPM packages of the release build, into target/debian and
+# target/generate-rpm. They need at least the glibc of the machine that
+# built them, so packages to hand out are built on the oldest base they
+# support.
+packages:
+    cargo deb -p niri-center-ui
+    cargo generate-rpm -p niri-center-ui

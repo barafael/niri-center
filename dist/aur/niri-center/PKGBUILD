@@ -1,0 +1,48 @@
+# Maintainer: Felin Tusun <16455996+felintusun@users.noreply.github.com>
+
+pkgname=niri-center
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Settings app for the niri Wayland compositor that edits your config without rewriting it'
+arch=(x86_64 aarch64)
+url='https://github.com/felintusun/niri-center'
+license=(GPL-3.0-or-later)
+# libxkbcommon is linked; wayland and the GPU loaders are opened at start
+depends=(glibc libgcc libxkbcommon wayland niri)
+makedepends=(cargo)
+# the headless UI tests lay text out in a system font
+checkdepends=(ttf-dejavu)
+optdepends=('vulkan-icd-loader: draw on the GPU through Vulkan rather than OpenGL or in software')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# `updpkgsums` once the tag v$pkgver is pushed: GitHub makes the tarball then
+sha256sums=('SKIP')
+
+# rust-toolchain.toml pins the toolchain clippy gates with, not one the build needs
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p niri-center-ui
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export ICED_TEST_BACKEND=tiny-skia
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/niri-center -t "$pkgdir/usr/bin"
+  install -Dm644 dist/*.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 dist/niri-center.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 THIRD_PARTY_LICENSES.md -t "$pkgdir/usr/share/licenses/$pkgname"
+}
