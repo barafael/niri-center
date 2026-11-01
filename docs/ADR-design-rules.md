@@ -1,7 +1,7 @@
 # ADR: colors, copy and layout
 
 **Status:** accepted 2026-10-04; amended 2026-10-06, 2026-10-08,
-2026-10-11 and 2026-10-30. Held provisionally (AGENTS.md [provisional]).
+2026-10-11 and 2026-10-30. Held provisionally (docs/edit-epistemology.md [provisional]).
 
 **Decision.**
 

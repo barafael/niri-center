@@ -1,6 +1,6 @@
 # ADR: the keyboard picture comes from xkb
 
-**Status:** accepted 2026-10-27. Held provisionally (AGENTS.md
+**Status:** accepted 2026-10-27. Held provisionally (docs/edit-epistemology.md
 [provisional]).
 
 **Decision.** The Keybinds page draws each layout the config lists from its

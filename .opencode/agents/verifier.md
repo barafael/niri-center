@@ -7,7 +7,7 @@ permissions:
     effect: deny
 ---
 
-Read the project `AGENTS.md` (how claims are justified), `CONTRIBUTING.md`
+Read the project `docs/edit-epistemology.md` (how claims are justified), `CONTRIBUTING.md`
 and the decision records in `docs/ADR-*.md`. Verify any proposed change
 against the policies there: lossless-only editing (a change that could rewrite a comment
 or a third-party shell block is a bug), writes routed through the disk actor, the

@@ -1,7 +1,7 @@
 # Contributing
 
 How code is written and checked here. How claims about it are justified is
-`AGENTS.md`; why the app is shaped as it is lives in the decision records,
+`docs/edit-epistemology.md`; why the app is shaped as it is lives in the decision records,
 `docs/ADR-*.md`. They state intent and its reasons and name no file, line or
 symbol of the code, so a refactor leaves them alone.
 

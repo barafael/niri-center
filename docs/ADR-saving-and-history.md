@@ -1,7 +1,7 @@
 # ADR: saved a moment after the change, with a history of exact texts
 
 **Status:** accepted 2026-10-08, replacing review-before-apply and Preview;
-amended 2026-10-09, 2026-10-11 and 2026-10-30. Held provisionally (AGENTS.md
+amended 2026-10-09, 2026-10-11 and 2026-10-30. Held provisionally (docs/edit-epistemology.md
 [provisional]).
 
 **Decision.** An edit is saved a moment after it is made, once niri accepts

@@ -2,7 +2,7 @@
 
 *Claims are held provisionally. A passing suite certifies agreement. A proof certifies within a model. World-claims stay empirical and human-anchored.*
 
-**What this is.** A standing policy for editing this codebase, with or without model assistance, about how claims may be justified. It is non-executable guidance held in `AGENTS.md`; the evidence behind each rule (verbatim quotations, effect sizes, and the evidence against) lives in `GROUNDING.md`, whose quotations are re-checked against their sources. It is not exempt from itself: every rule names the observation that would revise it. Rules are cited by their bracketed tag (`AGENTS.md [tiers]`), never by position, so they can be added, removed or reordered without breaking a reference.
+**What this is.** A standing policy for editing this codebase, with or without model assistance, about how claims may be justified. It is non-executable guidance held in `docs/edit-epistemology.md`; the evidence behind each rule (verbatim quotations, effect sizes, and the evidence against) lives in `GROUNDING.md`, whose quotations are re-checked against their sources. It is not exempt from itself: every rule names the observation that would revise it. Rules are cited by their bracketed tag (`docs/edit-epistemology.md [tiers]`), never by position, so they can be added, removed or reordered without breaking a reference.
 
 **Adopting it.** The rules are portable; the examples are Rust; substitute your language's equivalents. Everything here is provisional: run it on a real repo and revise what makes things worse.
 

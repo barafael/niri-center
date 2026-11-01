@@ -1,6 +1,6 @@
 # ADR: edits splice the original text
 
-**Status:** accepted; amended 2026-10-27. Held provisionally (AGENTS.md
+**Status:** accepted; amended 2026-10-27. Held provisionally (docs/edit-epistemology.md
 [provisional]).
 
 **Decision.** Every edit splices the original text, where niri reads it;

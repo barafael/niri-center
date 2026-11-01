@@ -1,7 +1,7 @@
 # ADR: Window rules goes in, by app
 
 **Status:** accepted 2026-10-11, tried at the user's request after weighing
-the drill-in navigation of gump. Held provisionally (AGENTS.md
+the drill-in navigation of gump. Held provisionally (docs/edit-epistemology.md
 [provisional]).
 
 **Decision.** Window rules goes in by level: an index of apps, an app's

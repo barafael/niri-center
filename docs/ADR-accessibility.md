@@ -1,6 +1,6 @@
 # ADR: no AccessKit work for now
 
-**Status:** accepted 2026-10-04. Held provisionally (AGENTS.md
+**Status:** accepted 2026-10-04. Held provisionally (docs/edit-epistemology.md
 [provisional]).
 
 **Decision.** No screen-reader work for now.

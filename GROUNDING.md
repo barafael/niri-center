@@ -1,4 +1,4 @@
-# Grounding for AGENTS.md
+# Grounding for docs/edit-epistemology.md
 
 *Each entry anchors a named rule; `[against]` marks evidence that cuts against the rule it informs and is kept for that reason. Quotations were checked against the source on 2026-09-28; `(secondary)` marks those seen only in a secondary source. Preprints are marked as such.*
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   // Repo-local OpenCode settings for niri-center.
-  // AGENTS.md (auto-loaded as project instructions) says how claims are
+  // docs/edit-epistemology.md (read when relevant, not auto-loaded) says how claims are
   // justified; CONTRIBUTING.md holds the code rules and docs/ADR-*.md the
   // decisions (lossless edits, writes through the disk actor, sandbox on,
   // `niri validate` as dialect oracle).

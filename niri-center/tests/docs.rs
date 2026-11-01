@@ -1,4 +1,4 @@
-//! The docs name files; each named file exists (AGENTS.md [maps]).
+//! The docs name files; each named file exists (docs/edit-epistemology.md [maps]).
 
 use std::path::Path;
 

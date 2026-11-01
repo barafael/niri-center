@@ -1,6 +1,6 @@
 # ADR: the app also runs in a browser
 
-**Status:** accepted 2026-10-06. Held provisionally (AGENTS.md
+**Status:** accepted 2026-10-06. Held provisionally (docs/edit-epistemology.md
 [provisional]).
 
 **Decision.** The app also runs in the browser, published with GitHub

@@ -1,7 +1,7 @@
 # ADR: where the app writes, and the sandbox around it
 
 **Status:** accepted (sandbox 2026-10-03, session bus 2026-10-06, XDG
-placement 2026-10-11). Held provisionally (AGENTS.md [provisional]).
+placement 2026-10-11). Held provisionally (docs/edit-epistemology.md [provisional]).
 
 **Decision.** The app writes only to the config's own directory (and where
 its symlink points) and to its folders where the XDG spec puts them, and
