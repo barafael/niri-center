@@ -16,7 +16,6 @@ repository = "https://github.com/felintusun/niri-center"
 niri-center = { path = "niri-center", version = "0.1.0" }
 niri-ipc = { version = "=26.4.0", features = ["clap"] } # pinned to niri 26.04 (see CONTRIBUTING.md); clap: the action catalog
 thiserror = "2"
-tracing = "0.1"
 # features per target in niri-center: the browser demo leaves out the Linux ones
 iced = { version = "0.14", default-features = false }
 

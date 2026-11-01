@@ -12,7 +12,6 @@ workspace = true
 thiserror.workspace = true
 # checked float-to-integer conversions (already here through iced)
 num-traits = "0.2"
-tracing.workspace = true
 tempfile = "3"
 # niri parses colors with this crate and version, so fields accept exactly what niri does
 csscolorparser = "0.8"
