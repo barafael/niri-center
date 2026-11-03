@@ -16,7 +16,7 @@ pub enum Scheme {
     Light,
 }
 
-/// A change of what the desktop asks for.
+/// One thing the desktop asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Appearance {
     Scheme(Scheme),
@@ -29,7 +29,7 @@ mod bus {
     use std::collections::HashMap;
 
     use futures_util::StreamExt;
-    use zbus::proxy::{Builder, CacheProperties};
+    use zbus::proxy::{Builder, CacheProperties, SignalStream};
     use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant};
 
     use super::{Appearance, Scheme};
@@ -37,6 +37,9 @@ mod bus {
     const PORTAL: &str = "org.freedesktop.portal.Desktop";
     const DESKTOP: &str = "/org/freedesktop/portal/desktop";
     const APPEARANCE: &str = "org.freedesktop.appearance";
+    // every `choose` has a connection of its own, whose name is in the
+    // request's path, so one token cannot answer for another request
+    const HANDLE_TOKEN: &str = "niri_center";
 
     /// The portal interfaces the app calls.
     #[derive(Debug, Clone, Copy)]
@@ -96,11 +99,7 @@ mod bus {
     }
 
     /// One `org.freedesktop.appearance` setting; `None` without an answer.
-    async fn appearance(key: &str) -> Option<u32> {
-        let connection = Connection::session().await.ok()?;
-        let settings = proxy(&connection, DESKTOP, Interface::Settings)
-            .await
-            .ok()?;
+    async fn appearance(settings: &Proxy<'_>, key: &str) -> Option<u32> {
         // ReadOne came with version 2 of the interface
         let read: zbus::Result<OwnedVariant> = settings.call("ReadOne", &(APPEARANCE, key)).await;
         let value = match read {
@@ -110,30 +109,32 @@ mod bus {
         number(&value)
     }
 
-    pub async fn scheme() -> Scheme {
-        appearance("color-scheme")
-            .await
-            .map_or(Scheme::NoPreference, scheme_of)
-    }
-
     /// `contrast`: "0: No preference (normal contrast), 1: Higher contrast".
-    pub async fn high_contrast() -> bool {
-        appearance("contrast").await == Some(1)
-    }
-
-    pub async fn watch(mut each: impl FnMut(Appearance) -> bool) {
+    pub async fn watch<Handed: Future<Output = bool>>(mut each: impl FnMut(Appearance) -> Handed) {
         let Ok(connection) = Connection::session().await else {
             return;
         };
         let Ok(settings) = proxy(&connection, DESKTOP, Interface::Settings).await else {
             return;
         };
+        // listening before the first read, so a change during it is not lost
+        // and cannot be overwritten by what the read saw
         let Ok(mut changes) = settings
             .receive_signal_with_args("SettingChanged", &[(0, APPEARANCE)])
             .await
         else {
             return;
         };
+        let scheme = appearance(&settings, "color-scheme")
+            .await
+            .map_or(Scheme::NoPreference, scheme_of);
+        if !each(Appearance::Scheme(scheme)).await {
+            return;
+        }
+        let high_contrast = appearance(&settings, "contrast").await == Some(1);
+        if !each(Appearance::HighContrast(high_contrast)).await {
+            return;
+        }
         while let Some(change) = changes.next().await {
             let Ok((_, key, value)) = change
                 .body()
@@ -146,10 +147,31 @@ mod bus {
                 ("contrast", Some(value)) => Appearance::HighContrast(value == 1),
                 _ => continue,
             };
-            if !each(appearance) {
+            if !each(appearance).await {
                 break;
             }
         }
+    }
+
+    /// The `Response` signals of the request object at `request_path`.
+    async fn answers_at(
+        connection: &Connection,
+        request_path: &str,
+    ) -> zbus::Result<SignalStream<'static>> {
+        proxy(connection, request_path, Interface::Request)
+            .await?
+            .receive_signal("Response")
+            .await
+    }
+
+    /// The first file in a successful answer; none when it lists no files.
+    fn first_uri(results: &HashMap<String, OwnedVariant>) -> Result<Option<String>, String> {
+        let uris = results
+            .get("uris")
+            .ok_or_else(|| "the chooser answered without uris".to_string())?;
+        let uris =
+            Vec::<String>::try_from(Variant::clone(uris)).map_err(|error| error.to_string())?;
+        Ok(uris.into_iter().next())
     }
 
     /// What the chooser answered: the file's URI, or none when cancelled.
@@ -165,17 +187,8 @@ mod bus {
             .as_str()
             .trim_start_matches(':')
             .replace('.', "_");
-        // one token per request, so two choosers open at once answer apart
-        let started = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_nanos());
-        let token = format!("niri_center_{}_{started}", std::process::id());
-        let expected = format!("{DESKTOP}/request/{sender}/{token}");
-        let request = proxy(&connection, &expected, Interface::Request)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut answers = request
-            .receive_signal("Response")
+        let expected = format!("{DESKTOP}/request/{sender}/{HANDLE_TOKEN}");
+        let mut answers = answers_at(&connection, &expected)
             .await
             .map_err(|error| error.to_string())?;
 
@@ -183,7 +196,7 @@ mod bus {
             .await
             .map_err(|error| error.to_string())?;
         let options = HashMap::from([
-            ("handle_token", Variant::from(token.as_str())),
+            ("handle_token", Variant::from(HANDLE_TOKEN)),
             ("modal", Variant::from(true)),
             ("directory", Variant::from(folder)),
         ]);
@@ -193,11 +206,7 @@ mod bus {
             .map_err(|error| error.to_string())?;
         // portals before the handle was predictable choose their own
         if handle.as_str() != expected {
-            let request = proxy(&connection, handle.as_str(), Interface::Request)
-                .await
-                .map_err(|error| error.to_string())?;
-            answers = request
-                .receive_signal("Response")
+            answers = answers_at(&connection, handle.as_str())
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -212,10 +221,7 @@ mod bus {
         // "0: Success, 1: The user cancelled the interaction, 2: The user
         // interaction was ended in some other way"
         match response {
-            0 => Ok(results
-                .get("uris")
-                .and_then(|uris| Vec::<String>::try_from(Variant::clone(uris)).ok())
-                .and_then(|uris| uris.into_iter().next())),
+            0 => first_uri(&results),
             1 => Ok(None),
             _ => Err("the chooser ended without a choice".to_string()),
         }
@@ -234,6 +240,27 @@ mod bus {
             assert_eq!(number(&Variant::from("dark")), None);
         }
 
+        fn answer_with_uris(uris: Variant<'_>) -> HashMap<String, OwnedVariant> {
+            HashMap::from([(
+                "uris".to_string(),
+                OwnedVariant::try_from(uris).expect("no file descriptor to clone"),
+            )])
+        }
+
+        #[test]
+        fn a_chooser_answer_gives_its_first_file() {
+            let answer = answer_with_uris(Variant::from(vec!["file:///first", "file:///second"]));
+            assert_eq!(first_uri(&answer), Ok(Some("file:///first".to_string())));
+            let no_files = answer_with_uris(Variant::from(Vec::<&str>::new()));
+            assert_eq!(first_uri(&no_files), Ok(None));
+        }
+
+        #[test]
+        fn a_chooser_answer_without_a_list_of_uris_is_no_cancel() {
+            assert!(first_uri(&HashMap::new()).is_err());
+            assert!(first_uri(&answer_with_uris(Variant::from(7u32))).is_err());
+        }
+
         #[test]
         fn color_scheme_numbers_are_the_portals() {
             assert_eq!(scheme_of(0), Scheme::NoPreference);
@@ -244,14 +271,9 @@ mod bus {
     }
 }
 
-/// The light or dark the desktop asks for; no preference without a portal.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn scheme() -> Scheme {
-    bus::scheme().await
-}
-
 /// Ask the user for a file, or a folder when `folder`; `Ok(None)` when they
-/// cancelled. The path comes back with the home folder as `~`.
+/// cancelled, an error when what they picked has no path here. The path comes
+/// back with the home folder as `~`.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn choose(folder: bool) -> Result<Option<String>, String> {
     let title = if folder {
@@ -260,10 +282,14 @@ pub async fn choose(folder: bool) -> Result<Option<String>, String> {
         "Choose a file"
     };
     match bus::choose(title, folder).await {
-        Ok(uri) => Ok(uri
-            .as_deref()
-            .and_then(file_path)
-            .map(|path| crate::store::tilde(std::path::Path::new(&path)))),
+        Ok(None) => Ok(None),
+        Ok(Some(uri)) => file_path(&uri)
+            .map(|path| Some(crate::store::tilde(std::path::Path::new(&path))))
+            .ok_or_else(|| {
+                format!(
+                    "The file chooser picked {uri}, which is not a path niri-center can use. You can type the path instead."
+                )
+            }),
         Err(failure) => Err(format!(
             "The file chooser did not open ({failure}). It needs xdg-desktop-portal with a file chooser, such as the gtk portal. You can type the path instead."
         )),
@@ -299,13 +325,6 @@ pub fn file_path(uri: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Whether the desktop asks apps for more contrast (GNOME's high-contrast
-/// switch sets it). No answer counts as no.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn high_contrast() -> bool {
-    bus::high_contrast().await
-}
-
 /// The browser's `prefers-contrast: more`, for the demo.
 #[cfg(target_arch = "wasm32")]
 pub async fn high_contrast() -> bool {
@@ -319,16 +338,23 @@ pub async fn high_contrast() -> bool {
         .is_some_and(|query| query.matches())
 }
 
-/// Hand every later change of the desktop's color scheme or contrast to
-/// `each`, until `each` says stop.
+/// Hand the desktop's color scheme and contrast (GNOME's high-contrast switch
+/// sets it) to `each`, then every later change of them, until `each` says
+/// stop. Without a portal's answer: no preference and no more contrast; without
+/// a session bus, nothing.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn watch_appearance(each: impl FnMut(Appearance) -> bool) {
+pub async fn watch_appearance<Handed: Future<Output = bool>>(
+    each: impl FnMut(Appearance) -> Handed,
+) {
     bus::watch(each).await;
 }
 
 /// The browser's preferences are read once, at start.
 #[cfg(target_arch = "wasm32")]
-pub async fn watch_appearance(_each: impl FnMut(Appearance) -> bool) {}
+pub async fn watch_appearance<Handed: Future<Output = bool>>(
+    _each: impl FnMut(Appearance) -> Handed,
+) {
+}
 
 #[cfg(test)]
 mod tests {
