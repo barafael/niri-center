@@ -69,10 +69,10 @@ pub struct Node {
 
 /// The nodes in `nodes` named `name` that niri actually reads: `/-`-disabled
 /// nodes are skipped, and with them everything nested inside.
-pub fn active_named<'nodes, 'name>(
+pub fn active_named<'nodes>(
     nodes: &'nodes [Node],
-    name: &'name str,
-) -> impl Iterator<Item = &'nodes Node> + use<'nodes, 'name> {
+    name: &str,
+) -> impl Iterator<Item = &'nodes Node> {
     nodes
         .iter()
         .filter(move |node| node.name == name && !node.disabled)
@@ -146,17 +146,12 @@ impl Document {
 
     /// All nodes in document order (DFS).
     pub fn iter_all(&self) -> impl Iterator<Item = &Node> {
-        fn walk<'node>(node: &'node Node, out: &mut Vec<&'node Node>) {
-            out.push(node);
-            for child in &node.children {
-                walk(child, out);
-            }
-        }
-        let mut out = Vec::new();
-        for root in &self.roots {
-            walk(root, &mut out);
-        }
-        out.into_iter()
+        let mut pending: Vec<&Node> = self.roots.iter().rev().collect();
+        std::iter::from_fn(move || {
+            let node = pending.pop()?;
+            pending.extend(node.children.iter().rev());
+            Some(node)
+        })
     }
 
     /// All nodes (any depth) with the given name, in document order.
