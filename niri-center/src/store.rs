@@ -28,10 +28,10 @@ mod engine;
 use engine::indentation;
 pub use engine::{Block, Override};
 
-const LAYOUT: [Block<'static>; 1] = [Block::named("layout")];
-const TOUCHPAD: [Block<'static>; 2] = [Block::named("input"), Block::named("touchpad")];
-const KEYBOARD: [Block<'static>; 2] = [Block::named("input"), Block::named("keyboard")];
-const XKB: [Block<'static>; 3] = [
+const LAYOUT: [Block; 1] = [Block::named("layout")];
+const TOUCHPAD: [Block; 2] = [Block::named("input"), Block::named("touchpad")];
+const KEYBOARD: [Block; 2] = [Block::named("input"), Block::named("keyboard")];
+const XKB: [Block; 3] = [
     Block::named("input"),
     Block::named("keyboard"),
     Block::named("xkb"),
