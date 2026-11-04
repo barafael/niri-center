@@ -24,6 +24,24 @@ pub enum Appearance {
     HighContrast(bool),
 }
 
+/// Why the file chooser gave no path.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ChooseError {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "The file chooser did not open ({0}). It needs xdg-desktop-portal with a file chooser, such as the gtk portal. You can type the path instead."
+    )]
+    DidNotOpen(#[from] bus::Failure),
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "The file chooser picked {uri}, which is not a path niri-center can use. You can type the path instead."
+    )]
+    NotAPath { uri: String },
+    #[cfg(target_arch = "wasm32")]
+    #[error("The file chooser opens in the desktop app. In this demo, type the path.")]
+    NoDesktop,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod bus {
     use std::collections::HashMap;
@@ -40,6 +58,21 @@ mod bus {
     // every `choose` has a connection of its own, whose name is in the
     // request's path, so one token cannot answer for another request
     const HANDLE_TOKEN: &str = "niri_center";
+
+    /// What went wrong asking the portal for a file.
+    #[derive(Debug, Clone, thiserror::Error)]
+    pub enum Failure {
+        #[error(transparent)]
+        Bus(#[from] zbus::Error),
+        #[error("no name on the session bus")]
+        NoBusName,
+        #[error("the portal closed without an answer")]
+        NoAnswer,
+        #[error("the chooser answered without uris")]
+        NoUris,
+        #[error("the chooser ended without a choice")]
+        Ended,
+    }
 
     /// The portal interfaces the app calls.
     #[derive(Debug, Clone, Copy)]
@@ -165,65 +198,47 @@ mod bus {
     }
 
     /// The first file in a successful answer; none when it lists no files.
-    fn first_uri(results: &HashMap<String, OwnedVariant>) -> Result<Option<String>, String> {
-        let uris = results
-            .get("uris")
-            .ok_or_else(|| "the chooser answered without uris".to_string())?;
-        let uris =
-            Vec::<String>::try_from(Variant::clone(uris)).map_err(|error| error.to_string())?;
+    fn first_uri(results: &HashMap<String, OwnedVariant>) -> Result<Option<String>, Failure> {
+        let uris = results.get("uris").ok_or(Failure::NoUris)?;
+        let uris = Vec::<String>::try_from(Variant::clone(uris))?;
         Ok(uris.into_iter().next())
     }
 
     /// What the chooser answered: the file's URI, or none when cancelled.
-    pub async fn choose(title: &str, folder: bool) -> Result<Option<String>, String> {
-        let connection = Connection::session()
-            .await
-            .map_err(|error| error.to_string())?;
+    pub async fn choose(title: &str, folder: bool) -> Result<Option<String>, Failure> {
+        let connection = Connection::session().await?;
         // the request's object is known before the call, so its answer is
         // listened for first and cannot come before it
         let sender = connection
             .unique_name()
-            .ok_or_else(|| "no name on the session bus".to_string())?
+            .ok_or(Failure::NoBusName)?
             .as_str()
             .trim_start_matches(':')
             .replace('.', "_");
         let expected = format!("{DESKTOP}/request/{sender}/{HANDLE_TOKEN}");
-        let mut answers = answers_at(&connection, &expected)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut answers = answers_at(&connection, &expected).await?;
 
-        let chooser = proxy(&connection, DESKTOP, Interface::FileChooser)
-            .await
-            .map_err(|error| error.to_string())?;
+        let chooser = proxy(&connection, DESKTOP, Interface::FileChooser).await?;
         let options = HashMap::from([
             ("handle_token", Variant::from(HANDLE_TOKEN)),
             ("modal", Variant::from(true)),
             ("directory", Variant::from(folder)),
         ]);
-        let handle: OwnedObjectPath = chooser
-            .call("OpenFile", &("", title, options))
-            .await
-            .map_err(|error| error.to_string())?;
+        let handle: OwnedObjectPath = chooser.call("OpenFile", &("", title, options)).await?;
         // portals before the handle was predictable choose their own
         if handle.as_str() != expected {
-            answers = answers_at(&connection, handle.as_str())
-                .await
-                .map_err(|error| error.to_string())?;
+            answers = answers_at(&connection, handle.as_str()).await?;
         }
-        let answer = answers
-            .next()
-            .await
-            .ok_or_else(|| "the portal closed without an answer".to_string())?;
+        let answer = answers.next().await.ok_or(Failure::NoAnswer)?;
         let (response, results) = answer
             .body()
-            .deserialize::<(u32, HashMap<String, OwnedVariant>)>()
-            .map_err(|error| error.to_string())?;
+            .deserialize::<(u32, HashMap<String, OwnedVariant>)>()?;
         // "0: Success, 1: The user cancelled the interaction, 2: The user
         // interaction was ended in some other way"
         match response {
             0 => first_uri(&results),
             1 => Ok(None),
-            _ => Err("the chooser ended without a choice".to_string()),
+            _ => Err(Failure::Ended),
         }
     }
 
@@ -250,15 +265,21 @@ mod bus {
         #[test]
         fn a_chooser_answer_gives_its_first_file() {
             let answer = answer_with_uris(Variant::from(vec!["file:///first", "file:///second"]));
-            assert_eq!(first_uri(&answer), Ok(Some("file:///first".to_string())));
+            assert_eq!(
+                first_uri(&answer).ok(),
+                Some(Some("file:///first".to_string()))
+            );
             let no_files = answer_with_uris(Variant::from(Vec::<&str>::new()));
-            assert_eq!(first_uri(&no_files), Ok(None));
+            assert_eq!(first_uri(&no_files).ok(), Some(None));
         }
 
         #[test]
         fn a_chooser_answer_without_a_list_of_uris_is_no_cancel() {
-            assert!(first_uri(&HashMap::new()).is_err());
-            assert!(first_uri(&answer_with_uris(Variant::from(7u32))).is_err());
+            assert!(matches!(first_uri(&HashMap::new()), Err(Failure::NoUris)));
+            assert!(matches!(
+                first_uri(&answer_with_uris(Variant::from(7u32))),
+                Err(Failure::Bus(_))
+            ));
         }
 
         #[test]
@@ -275,31 +296,24 @@ mod bus {
 /// cancelled, an error when what they picked has no path here. The path comes
 /// back with the home folder as `~`.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn choose(folder: bool) -> Result<Option<String>, String> {
+pub async fn choose(folder: bool) -> Result<Option<String>, ChooseError> {
     let title = if folder {
         "Choose a folder"
     } else {
         "Choose a file"
     };
-    match bus::choose(title, folder).await {
-        Ok(None) => Ok(None),
-        Ok(Some(uri)) => file_path(&uri)
-            .map(|path| Some(crate::store::tilde(std::path::Path::new(&path))))
-            .ok_or_else(|| {
-                format!(
-                    "The file chooser picked {uri}, which is not a path niri-center can use. You can type the path instead."
-                )
-            }),
-        Err(failure) => Err(format!(
-            "The file chooser did not open ({failure}). It needs xdg-desktop-portal with a file chooser, such as the gtk portal. You can type the path instead."
-        )),
-    }
+    let Some(uri) = bus::choose(title, folder).await? else {
+        return Ok(None);
+    };
+    file_path(&uri)
+        .map(|path| Some(crate::store::tilde(std::path::Path::new(&path))))
+        .ok_or(ChooseError::NotAPath { uri })
 }
 
 /// The browser demo has no file chooser to ask.
 #[cfg(target_arch = "wasm32")]
-pub async fn choose(_folder: bool) -> Result<Option<String>, String> {
-    Err("The file chooser opens in the desktop app. In this demo, type the path.".to_string())
+pub async fn choose(_folder: bool) -> Result<Option<String>, ChooseError> {
+    Err(ChooseError::NoDesktop)
 }
 
 /// `file:///home/me/My%20Pictures` → `/home/me/My Pictures`.
@@ -358,6 +372,23 @@ pub async fn watch_appearance<Handed: Future<Output = bool>>(
 
 #[cfg(test)]
 mod tests {
+    use super::{ChooseError, bus};
+
+    #[test]
+    fn the_status_line_says_why_the_chooser_gave_no_path() {
+        assert_eq!(
+            ChooseError::from(bus::Failure::NoAnswer).to_string(),
+            "The file chooser did not open (the portal closed without an answer). It needs xdg-desktop-portal with a file chooser, such as the gtk portal. You can type the path instead."
+        );
+        assert_eq!(
+            ChooseError::NotAPath {
+                uri: "https://example.org".to_string()
+            }
+            .to_string(),
+            "The file chooser picked https://example.org, which is not a path niri-center can use. You can type the path instead."
+        );
+    }
+
     #[test]
     fn portal_uris_become_paths() {
         assert_eq!(
