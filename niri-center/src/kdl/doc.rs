@@ -40,13 +40,6 @@ pub struct Value {
     pub span: Span,
 }
 
-impl Value {
-    /// Exact raw bytes from the file, including quotes for strings.
-    pub fn raw<'doc>(&self, doc: &'doc Document) -> &'doc str {
-        &doc.source[self.span.start..self.span.end]
-    }
-}
-
 /// A property `name = value` inside a node head.
 #[derive(Debug, Clone)]
 pub struct Prop {
@@ -72,13 +65,6 @@ pub struct Node {
     /// but we keep them parsed and losslessly editable so the UI can offer
     /// "disable / enable" instead of delete.
     pub disabled: bool,
-}
-
-impl Node {
-    /// The node exactly as written, from its name to its last token.
-    pub fn raw<'doc>(&self, doc: &'doc Document) -> &'doc str {
-        &doc.source[self.node_span.start..self.node_span.end]
-    }
 }
 
 /// The nodes in `nodes` named `name` that niri actually reads: `/-`-disabled
@@ -150,6 +136,12 @@ impl Document {
         // the lines starting at or before it
         self.line_starts
             .partition_point(|&start| start <= offset.min(self.source.len()))
+    }
+
+    /// The text at `span` exactly as written: a value with its quotes, a
+    /// node from its name to its last token.
+    pub fn raw(&self, span: Span) -> &str {
+        &self.source[span.start..span.end]
     }
 
     /// All nodes in document order (DFS).
