@@ -114,7 +114,7 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
         return Task::none();
     };
     match rest {
-        Reply::Loaded(Err(failure)) => state.load_error = Some(failure),
+        Reply::Loaded(Err(failure)) => state.load_error = Some(failure.to_string()),
         Reply::Texts {
             purpose: Purpose::Copy,
             files,
@@ -152,33 +152,27 @@ fn disk_reply(state: &mut App, reply: Reply) -> Task<Message> {
         Reply::Listing { backups, snapshots } => {
             state.files.listing = pages::files::Listing { backups, snapshots };
         }
-        Reply::Backup { name, text } => {
-            let staged = text.and_then(|text| {
-                state
-                    .session
-                    .store
-                    .as_mut()
-                    .map_or(Ok(()), |store| store.stage_named(&name, &text))
-                    .map_err(|failure| failure.to_string())
-            });
-            if let Err(failure) = staged {
-                state.status = error(failure);
+        Reply::Backup { name, text } => match text {
+            Ok(text) => {
+                if let Some(store) = &mut state.session.store
+                    && let Err(failure) = store.stage_named(&name, &text)
+                {
+                    state.status = error(failure.to_string());
+                }
             }
-        }
-        Reply::Snapshot { files, .. } => {
-            let staged = files.and_then(|files| {
-                state
-                    .session
-                    .store
-                    .as_mut()
-                    .map_or(Ok(()), |store| store.stage_snapshot(&files))
-                    .map_err(|failure| failure.to_string())
-            });
-            if let Err(failure) = staged {
-                state.status = error(failure);
+            Err(failure) => state.status = error(failure.to_string()),
+        },
+        Reply::Snapshot { files, .. } => match files {
+            Ok(files) => {
+                if let Some(store) = &mut state.session.store
+                    && let Err(failure) = store.stage_snapshot(&files)
+                {
+                    state.status = error(failure.to_string());
+                }
             }
-        }
-        Reply::Failed(failure) => state.status = error(failure),
+            Err(failure) => state.status = error(failure.to_string()),
+        },
+        Reply::Failed(failure) => state.status = error(failure.to_string()),
         Reply::Loaded(Ok(_))
         | Reply::History(_)
         | Reply::Checked(_)

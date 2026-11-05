@@ -16,11 +16,12 @@ use iced::Size;
 use iced_test::Error;
 use iced_test::simulator::Simulator;
 use niri_center::animations::{Animation, Curve};
-use niri_center::disk::actor::{Actor, Command, Reply};
+use niri_center::disk::actor::{Actor, Command, DiskFailure, Reply};
 use niri_center::disk::{Disk, Folders};
 use niri_center::session::{SaveState, SaveWhen};
 use niri_center::settings::{Coordinate, DraftKey, OutputSetting, Setting};
 use niri_center::store::{RuleProperty, Store, TextMatch};
+use niri_center::validate::ReadsError;
 
 use niri_center::niri::{NiriError, OpenWindow, Running};
 use niri_center::outputs::{MonitorInfo, OutputInfo};
@@ -405,9 +406,9 @@ fn render_screens_for_review() -> Result<(), Error> {
     shoot(&app, "close")?;
     app.closing = None;
     app.session.niri_reloaded(true);
-    app.session.diagnosed(Err(
-        "Error:   × unexpected node\n   ╭─[config.kdl:3:5]".into()
-    ));
+    app.session.diagnosed(Err(ReadsError::Refused(
+        "Error:   × unexpected node\n   ╭─[config.kdl:3:5]".into(),
+    )));
     shoot(&app, "health")?;
     app.session.health_fixed();
     // a change niri turns down: not saved, with niri's words
@@ -525,9 +526,9 @@ fn render_screens_for_review() -> Result<(), Error> {
         .unwrap();
     // niri's words arrive once the name is misspelled on disk
     app.session.niri_reloaded(true);
-    app.session.diagnosed(Err(
+    app.session.diagnosed(Err(ReadsError::Refused(
         "Error:   × error loading config\n  ╰─▶ unexpected node `gpas`".into(),
-    ));
+    )));
     app.broken_line_shown = true;
     shoot(&app, "repair")?;
     app.session.health_fixed();
@@ -1909,9 +1910,9 @@ fn saving_waits_while_niri_cannot_read_the_config_and_blames_nobody() {
     // found at start, before any change
     apply(
         &mut app,
-        [Message::Disk(Reply::Checked(Err(
-            "unexpected node `gpas`".into()
-        )))],
+        [Message::Disk(Reply::Checked(Err(ReadsError::Refused(
+            "unexpected node `gpas`".into(),
+        ))))],
     );
     run(
         &mut app,
@@ -2139,9 +2140,9 @@ fn closing_while_niri_cannot_read_the_config_says_what_is_dropped() {
     app.session.platform = Platform::Desktop;
     apply(
         &mut app,
-        [Message::Disk(Reply::Checked(Err(
-            "unexpected node `gpas`".into()
-        )))],
+        [Message::Disk(Reply::Checked(Err(ReadsError::Refused(
+            "unexpected node `gpas`".into(),
+        ))))],
     );
     run(
         &mut app,
@@ -2325,9 +2326,9 @@ fn a_name_niri_does_not_know_gets_a_one_click_fix() {
         &mut app,
         [
             Message::NiriConfigLoaded(true),
-            Message::Disk(Reply::Diagnosed(Err(
+            Message::Disk(Reply::Diagnosed(Err(ReadsError::Refused(
                 "Error:   × error loading config\n  ╰─▶ unexpected node `gpas`".into(),
-            ))),
+            )))),
         ],
     );
     assert!(shows(
@@ -2358,9 +2359,9 @@ fn a_failed_reload_in_niri_raises_a_banner_with_the_reason() {
     ));
     apply(
         &mut app,
-        [Message::Disk(Reply::Diagnosed(Err(
-            "× expected a value".into()
-        )))],
+        [Message::Disk(Reply::Diagnosed(Err(ReadsError::Refused(
+            "× expected a value".into(),
+        ))))],
     );
     assert!(shows(&app, WIDE, "× expected a value"));
     click(&mut app, "Dismiss");
@@ -2709,6 +2710,105 @@ fn a_niri_that_does_not_answer_is_said_on_its_pages() {
         &app,
         TALL,
         "niri did not answer: ipc transport error: socket gone"
+    ));
+}
+
+#[test]
+fn what_the_disk_could_not_do_is_said() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    for (reply, said) in [
+        (
+            Reply::Backup {
+                name: "a.kdl".into(),
+                text: Err(DiskFailure::NoBackup {
+                    name: "a.kdl".into(),
+                }),
+            },
+            "no backup of a.kdl",
+        ),
+        (
+            Reply::Snapshot {
+                name: "before".into(),
+                files: Err(DiskFailure::Snapshot {
+                    name: "before".into(),
+                    reason: "denied".into(),
+                }),
+            },
+            "snapshot before: denied",
+        ),
+        (
+            Reply::Failed(DiskFailure::Preference {
+                reason: "denied".into(),
+            }),
+            "The preference could not be kept: denied",
+        ),
+        (
+            Reply::Failed(DiskFailure::History("the disk is full".into())),
+            "the disk is full",
+        ),
+    ] {
+        apply(&mut app, [Message::Disk(reply)]);
+        assert_eq!(status_text(&app), said);
+    }
+}
+
+#[test]
+fn a_backup_or_snapshot_the_config_has_no_place_for_says_so() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    apply(
+        &mut app,
+        [Message::Disk(Reply::Backup {
+            name: "elsewhere.kdl".into(),
+            text: Ok("layout {\n}\n".into()),
+        })],
+    );
+    assert_eq!(
+        status_text(&app),
+        "elsewhere.kdl is not part of the loaded config"
+    );
+    apply(
+        &mut app,
+        [Message::Disk(Reply::Snapshot {
+            name: "before".into(),
+            files: Ok(vec![("elsewhere.kdl".into(), "layout {\n}\n".into())]),
+        })],
+    );
+    assert_eq!(
+        status_text(&app),
+        "no file in the snapshot is part of the config now"
+    );
+}
+
+#[test]
+fn a_config_that_did_not_load_says_why() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    apply(
+        &mut app,
+        [Message::Disk(Reply::Loaded(Err(DiskFailure::Read {
+            path: "/niri/config.kdl".into(),
+            reason: "denied".into(),
+        })))],
+    );
+    assert_eq!(
+        app.load_error.as_deref(),
+        Some("failed to read /niri/config.kdl: denied")
+    );
+}
+
+#[test]
+fn a_save_that_failed_says_why_in_the_banner_and_on_closing() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    app.session.problem = Some(Problem::Failed(DiskFailure::Validator("no niri".into())));
+    assert!(shows(
+        &app,
+        WIDE,
+        "Not saved: niri validate could not run: no niri"
+    ));
+    app.closing = Some(crate::app::Closing::Asking);
+    assert!(shows(
+        &app,
+        WIDE,
+        "It could not be saved: niri validate could not run: no niri."
     ));
 }
 
