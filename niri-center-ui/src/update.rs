@@ -236,7 +236,7 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Some(store) = &mut state.session.store
                 && let Err(failure) = settings::edit(store, &mut state.session.drafts, id, edit)
             {
-                state.status = error(failure);
+                state.status = error(failure.to_string());
             }
         }
         Message::Output(output, child, edit) => {
@@ -252,7 +252,7 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Err(failure) = state.session.change_display(typed, |store, drafts| {
                 settings::edit_output(store, drafts, connected, &output, child, edit)
             }) {
-                state.status = error(failure);
+                state.status = error(failure.to_string());
             }
         }
         Message::OpenColor(field, shown, target) => {
@@ -504,7 +504,7 @@ pub fn update(state: &mut App, message: Message) -> Task<Message> {
                         setting,
                         settings::Edit::Unset,
                     ) {
-                        state.status = error(failure);
+                        state.status = error(failure.to_string());
                         break;
                     }
                 }

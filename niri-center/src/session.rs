@@ -775,11 +775,11 @@ impl Session {
     /// for their save are saved first, so the trial covers this change
     /// alone. A picked value is saved and tried at once. A `typed` one is
     /// tried when its save comes, after the typing stops.
-    pub fn change_display(
+    pub fn change_display<Failure>(
         &mut self,
         typed: bool,
-        edit: impl FnOnce(&mut Store, &mut Drafts) -> Result<(), String>,
-    ) -> Result<(), String> {
+        edit: impl FnOnce(&mut Store, &mut Drafts) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
         if !typed {
             self.save();
         }

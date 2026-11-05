@@ -346,16 +346,18 @@ fn the_last_display_that_is_on_stays_on() {
     let mut drafts = Drafts::default();
     let outputs = [connected("DP-1", 0.0), connected("eDP-1", 1920.0)];
     // DP-1 is off already: eDP-1 is the only one on
-    assert!(
-        edit_output(
-            &mut store,
-            &mut drafts,
-            &outputs,
-            "eDP-1",
-            OutputSetting::Off,
-            Edit::Switch(true),
-        )
-        .is_err()
+    let refused = edit_output(
+        &mut store,
+        &mut drafts,
+        &outputs,
+        "eDP-1",
+        OutputSetting::Off,
+        Edit::Switch(true),
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "eDP-1 is the only display that is on, so it stays on."
     );
     assert!(!store.document().to_string().contains("eDP-1"));
     // with DP-1 back on, eDP-1 may go off

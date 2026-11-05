@@ -2128,7 +2128,7 @@ pub fn edit(
     drafts: &mut Drafts,
     setting: Setting,
     edit: Edit,
-) -> Result<(), String> {
+) -> Result<(), StoreError> {
     let spec = setting.spec();
     edit_in(
         store,
@@ -2149,11 +2149,11 @@ pub fn edit_in(
     chain: &[Block],
     key: &DraftKey,
     edit: Edit,
-) -> Result<(), String> {
+) -> Result<(), StoreError> {
     let Some(reading) = drafts.reading(key, spec.kind, edit) else {
         return Ok(());
     };
-    write(store, chain, spec.child.as_str(), spec.kind, &reading).map_err(|error| error.to_string())
+    write(store, chain, spec.child.as_str(), spec.kind, &reading)
 }
 
 /// Whether a display other than `output` is connected and on. Turning off
@@ -2166,6 +2166,15 @@ pub fn others_on(store: &Store, connected: &[OutputInfo], output: &str) -> bool 
         .any(|other| other.rect.is_some() && !store.is_set(&output_chain(&other.name), "off"))
 }
 
+/// Why one display's setting was not changed.
+#[derive(Debug, thiserror::Error)]
+pub enum OutputEditError {
+    #[error("{output} is the only display that is on, so it stays on.")]
+    LastOneOn { output: String },
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
 /// [`edit`] for one display's `setting`, in its `output` block. The last
 /// display that is on stays on.
 pub fn edit_output(
@@ -2175,14 +2184,14 @@ pub fn edit_output(
     output: &str,
     setting: OutputSetting,
     edit: Edit,
-) -> Result<(), String> {
+) -> Result<(), OutputEditError> {
     if setting == OutputSetting::Off
         && matches!(edit, Edit::Switch(true))
         && !others_on(store, connected, output)
     {
-        return Err(format!(
-            "{output} is the only display that is on, so it stays on."
-        ));
+        return Err(OutputEditError::LastOneOn {
+            output: output.to_string(),
+        });
     }
     edit_in(
         store,
@@ -2191,7 +2200,8 @@ pub fn edit_output(
         &output_chain(output),
         &DraftKey::Output(output.to_string(), setting),
         edit,
-    )
+    )?;
+    Ok(())
 }
 
 /// A line under a row's label: a fact about the setting, or a warning.
@@ -2504,6 +2514,17 @@ mod tests {
                 .is_some()
         );
         assert_eq!(drafts.error(&key), None);
+    }
+
+    #[test]
+    fn a_store_failure_on_a_display_reads_as_the_store_says_it() {
+        assert_eq!(
+            OutputEditError::from(StoreError::OutputNotFound {
+                name: "DP-9".into()
+            })
+            .to_string(),
+            "output `DP-9` not found in the loaded config set"
+        );
     }
 
     #[test]

@@ -2593,6 +2593,24 @@ fn a_staged_scale_that_makes_displays_overlap_is_pointed_out() {
 }
 
 #[test]
+fn turning_off_the_last_display_says_why_it_stays_on() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    app.outputs.retain(|output| output.name == "eDP-1");
+    apply(
+        &mut app,
+        [Message::Output(
+            "eDP-1".into(),
+            OutputSetting::Off,
+            Edit::Switch(true),
+        )],
+    );
+    assert_eq!(
+        status_text(&app),
+        "eDP-1 is the only display that is on, so it stays on."
+    );
+}
+
+#[test]
 fn the_only_display_that_is_on_cannot_be_turned_off() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     app.outputs.retain(|output| output.name == "eDP-1");
