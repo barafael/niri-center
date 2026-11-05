@@ -582,11 +582,11 @@ fn screen(state: &App) -> Size {
         .displays
         .monitors
         .first()
-        .map_or(Size::new(1920.0, 1200.0), |(_, m)| {
+        .map_or(Size::new(1920.0, 1200.0), |display| {
             // screen sizes are far inside f32's range
             Size::new(
-                m.width.to_f32().unwrap_or(1920.0),
-                m.height.to_f32().unwrap_or(1200.0),
+                display.rect.width.to_f32().unwrap_or(1920.0),
+                display.rect.height.to_f32().unwrap_or(1200.0),
             )
         })
 }

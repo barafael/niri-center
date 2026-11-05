@@ -352,3 +352,24 @@ fn the_last_display_that_is_on_stays_on() {
     .unwrap();
     assert!(store.document().to_string().contains("output \"eDP-1\""));
 }
+
+#[test]
+fn a_typed_position_keeps_the_other_coordinate_of_that_display() {
+    let (_dir, mut store) = tree(&[(
+        "config.kdl",
+        "output \"DP-1\" {\n    position x=100 y=300\n}\noutput \"eDP-1\" {\n    position x=0 y=0\n}\n",
+    )]);
+    let mut drafts = niri_center::settings::Drafts::default();
+    let outputs = [connected("DP-1", 100.0), connected("eDP-1", 0.0)];
+    niri_center::outputs::type_position(
+        &mut store,
+        &mut drafts,
+        &outputs,
+        "DP-1",
+        niri_center::settings::Coordinate::X,
+        "50".to_string(),
+    )
+    .unwrap();
+    let written = store.document().to_string();
+    assert!(written.contains("position x=50 y=300"), "{written}");
+}

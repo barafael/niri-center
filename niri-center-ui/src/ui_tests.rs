@@ -3817,3 +3817,53 @@ fn the_config_file_page_shows_every_included_file_and_folds_them() {
     apply(&mut app, messages);
     assert_eq!(count_shown(&app, TALL, "2"), 3);
 }
+
+#[test]
+fn a_dropped_display_moves_on_the_arrangement_and_no_other_does() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Displays);
+    let names: Vec<&str> = app
+        .displays
+        .monitors
+        .iter()
+        .map(|display| display.name.as_str())
+        .collect();
+    assert_eq!(names, ["DP-1", "eDP-1"]);
+    apply(
+        &mut app,
+        [Message::Displays(displays::Message::Dropped(
+            crate::monitors::DroppedMonitor {
+                name: "DP-1".into(),
+                x: -2500.0,
+                y: 30.0,
+            },
+        ))],
+    );
+    let lefts: Vec<f64> = app
+        .displays
+        .monitors
+        .iter()
+        .map(|display| display.rect.x)
+        .collect();
+    assert_eq!(lefts, [-2560.0, 0.0]);
+}
+
+#[test]
+fn each_display_in_the_list_says_its_own_size() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Displays);
+    assert!(shows(&app, TALL, "DP-1, 2560 × 1440 after scaling"));
+    assert!(shows(&app, TALL, "eDP-1, 1707 × 1067 after scaling"));
+}
+
+#[test]
+fn the_position_row_shows_where_the_selected_display_is() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Displays);
+    assert!(shows(&app, TALL, "1707"));
+    apply(
+        &mut app,
+        [Message::Displays(displays::Message::Pick("eDP-1".into()))],
+    );
+    assert!(!shows(&app, TALL, "1707"));
+}
