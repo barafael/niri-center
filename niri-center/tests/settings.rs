@@ -313,6 +313,33 @@ fn connected(name: &str, x: f64) -> niri_center::outputs::OutputInfo {
 }
 
 #[test]
+fn a_position_that_is_no_whole_number_says_so_and_writes_nothing() {
+    use niri_center::outputs::type_position;
+    use niri_center::settings::{Coordinate, DraftKey, Drafts};
+    let (_dir, mut store) = tree(&[("config.kdl", "layout {\n}\n")]);
+    let before = store.document().to_string();
+    let mut drafts = Drafts::default();
+    let outputs = [connected("DP-1", 0.0)];
+    type_position(
+        &mut store,
+        &mut drafts,
+        &outputs,
+        "DP-1",
+        Coordinate::X,
+        "left".to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        drafts
+            .error(&DraftKey::Position("DP-1".to_string(), Coordinate::X))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("A position is a whole number of pixels.")
+    );
+    assert_eq!(store.document().to_string(), before);
+}
+
+#[test]
 fn the_last_display_that_is_on_stays_on() {
     use niri_center::settings::{Drafts, Edit, OutputSetting, edit_output};
     let (_dir, mut store) = tree(&[("config.kdl", "output \"DP-1\" {\n    off\n}\n")]);

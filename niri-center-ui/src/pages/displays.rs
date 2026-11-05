@@ -247,7 +247,7 @@ fn position_row(
             .drafts
             .error(&DraftKey::Position(output.name.clone(), coordinate))
         {
-            label = label.push(text(problem.clone()).size(12).style(theme::error));
+            label = label.push(text(problem.to_string()).size(12).style(theme::error));
         }
     }
     row![

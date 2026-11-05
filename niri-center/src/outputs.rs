@@ -2,7 +2,7 @@
 //! their modes in words, the arrangement with staged changes applied, and
 //! where a dragged display lands.
 
-use crate::settings::{Coordinate, DraftKey, Drafts};
+use crate::settings::{Coordinate, DraftKey, Drafts, InputError};
 use crate::store::{Block, Store};
 use crate::words::short_number;
 use num_traits::ToPrimitive;
@@ -243,11 +243,7 @@ pub fn type_position(
         return Ok(());
     };
     let Ok(value) = typed.trim().parse::<i64>() else {
-        drafts.keep(
-            &key,
-            typed,
-            Some("A position is a whole number of pixels.".into()),
-        );
+        drafts.keep(&key, typed, Some(InputError::Position));
         return Ok(());
     };
     drafts.keep(&key, typed, None);
