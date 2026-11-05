@@ -276,7 +276,7 @@ pub fn update(state: &mut App, message: Message) -> Task<AppMessage> {
                         done.to_string()
                     });
                 }
-                Err(failure) => state.status = error(failure),
+                Err(failure) => state.status = error(failure.to_string()),
             }
         }
         Message::On(index, on) => {

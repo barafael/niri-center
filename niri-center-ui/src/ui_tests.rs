@@ -2611,6 +2611,25 @@ fn turning_off_the_last_display_says_why_it_stays_on() {
 }
 
 #[test]
+fn a_binding_form_that_cannot_go_in_says_why_and_stays_open() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    app.keybinds.form = Some(niri_center::forms::BindingForm::default());
+    apply(&mut app, [Message::Keybinds(keybinds::Message::Save)]);
+    assert_eq!(status_text(&app), "Enter a key combo, for example Mod+T.");
+    assert!(app.keybinds.form.is_some());
+}
+
+#[test]
+fn a_rule_draft_that_cannot_go_in_says_why() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    apply(&mut app, [Message::Rules(rules::Message::Add)]);
+    assert_eq!(
+        status_text(&app),
+        "Say which windows: an app ID, a title or a state. Or pick a window."
+    );
+}
+
+#[test]
 fn the_only_display_that_is_on_cannot_be_turned_off() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     app.outputs.retain(|output| output.name == "eDP-1");
