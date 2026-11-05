@@ -83,6 +83,13 @@ impl<T> std::fmt::Display for Labeled<T> {
     }
 }
 
+/// One option of a [`choice_list`]: what gets written and what the user reads.
+#[derive(Debug, Clone)]
+pub struct ChoiceOption {
+    pub value: String,
+    pub label: String,
+}
+
 /// Whether the control for `kind` goes under its label rather than beside it.
 pub fn is_wide(state: &App, key: &DraftKey, kind: Kind) -> bool {
     matches!(
@@ -132,9 +139,12 @@ pub fn control<'app>(
         }
         (Kind::OnOff, Reading::OnOff(current)) => on_off_list(current, default, make),
         (Kind::Choice(options), Reading::Value(current)) => {
-            let labeled: Vec<(String, String)> = options
+            let labeled: Vec<ChoiceOption> = options
                 .iter()
-                .map(|(value, label)| ((*value).to_string(), (*label).to_string()))
+                .map(|(value, label)| ChoiceOption {
+                    value: (*value).to_string(),
+                    label: (*label).to_string(),
+                })
                 .collect();
             let shown_default = kind.word(default).unwrap_or(default);
             choice_list(
@@ -146,8 +156,14 @@ pub fn control<'app>(
         }
         (Kind::Bool, Reading::Value(current)) => choice_list(
             vec![
-                ("true".to_string(), "On".to_string()),
-                ("false".to_string(), "Off".to_string()),
+                ChoiceOption {
+                    value: "true".to_string(),
+                    label: "On".to_string(),
+                },
+                ChoiceOption {
+                    value: "false".to_string(),
+                    label: "Off".to_string(),
+                },
             ],
             current.as_deref(),
             &default_label(kind.word(default).unwrap_or(default)),
@@ -183,7 +199,10 @@ pub fn control<'app>(
                 .system
                 .cursor_themes
                 .iter()
-                .map(|theme_name| (theme_name.clone(), theme_name.clone()))
+                .map(|theme_name| ChoiceOption {
+                    value: theme_name.clone(),
+                    label: theme_name.clone(),
+                })
                 .collect();
             choice_list(themes, current.as_deref(), &default_label(default), make)
         }
@@ -197,7 +216,10 @@ pub fn control<'app>(
                     } else {
                         format!("{} ({})", output.name, output.description)
                     };
-                    (output.name.clone(), label)
+                    ChoiceOption {
+                        value: output.name.clone(),
+                        label,
+                    }
                 })
                 .collect();
             choice_list(outputs, current.as_deref(), &default_label(default), make)
@@ -264,11 +286,11 @@ fn on_off_list(
         .into()
 }
 
-/// A pick list of `(value, label)` options with niri's default first (it
-/// removes the setting). A current value missing from the options is kept,
-/// so the list never hides what the config says.
+/// A pick list of `options` with niri's default first (it removes the
+/// setting). A current value missing from the options is kept, so the list
+/// never hides what the config says.
 pub fn choice_list(
-    options: Vec<(String, String)>,
+    options: Vec<ChoiceOption>,
     current: Option<&str>,
     default: &str,
     make: impl Fn(Edit) -> Message + 'static,
@@ -277,10 +299,14 @@ pub fn choice_list(
         value: None,
         label: default.to_string(),
     }];
-    items.extend(options.into_iter().map(|(value, label)| Labeled {
-        value: Some(value),
-        label,
-    }));
+    items.extend(
+        options
+            .into_iter()
+            .map(|ChoiceOption { value, label }| Labeled {
+                value: Some(value),
+                label,
+            }),
+    );
     if let Some(value) = current
         && !items
             .iter()
@@ -747,21 +773,30 @@ fn default_size(
                     .as_str(),
             )
         });
-    let mut options = vec![(String::new(), "The app decides".to_string())];
+    let mut options = vec![ChoiceOption {
+        value: String::new(),
+        label: "The app decides".to_string(),
+    }];
     for (name, value) in presets {
         let entry = format!("{name} {value}");
-        options.push((entry.clone(), size_label(&name, &value)));
+        options.push(ChoiceOption {
+            value: entry.clone(),
+            label: size_label(&name, &value),
+        });
     }
-    let mut items: Vec<(String, String)> = Vec::new();
-    for (value, label) in options {
-        if !items.iter().any(|(v, _)| *v == value) {
-            items.push((value, label));
+    let mut items: Vec<ChoiceOption> = Vec::new();
+    for option in options {
+        if !items.iter().any(|item| item.value == option.value) {
+            items.push(option);
         }
     }
     if let Some(value) = &current
-        && !items.iter().any(|(v, _)| v == value)
+        && !items.iter().any(|item| item.value == *value)
     {
-        items.push((value.to_string(), label_of(value)));
+        items.push(ChoiceOption {
+            value: value.to_string(),
+            label: label_of(value),
+        });
     }
     choice_list(items, current, &default_label(&label_of(default)), make)
 }

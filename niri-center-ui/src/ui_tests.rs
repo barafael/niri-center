@@ -3867,3 +3867,119 @@ fn the_position_row_shows_where_the_selected_display_is() {
     );
     assert!(!shows(&app, TALL, "1707"));
 }
+
+/// How tall a pick list is, and each option it opens: a line of the app's
+/// 14 px text and iced's 5 px of padding above and below it.
+const PICK_HEIGHT: f32 = 14.0 * 1.3 + 10.0;
+
+/// What choosing an option sends. A pick list shows no text a test can find,
+/// so it goes by places: `list` is the middle of the closed list, and `place`
+/// counts down the options it opens, niri's default being 0.
+fn pick(mut ui: Simulator<'_, Message>, list: iced::Point, place: usize) -> Vec<Message> {
+    ui.point_at(list);
+    ui.simulate(iced_test::simulator::click());
+    let option = iced::Point::new(list.x, list.y + PICK_HEIGHT * (place as f32 + 1.0));
+    ui.point_at(option);
+    ui.simulate([iced::Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: option,
+    })]);
+    ui.simulate(iced_test::simulator::click());
+    ui.into_messages().collect()
+}
+
+/// The value `messages` choose: one choice, or the test fails.
+fn chosen(messages: &[Message]) -> Option<String> {
+    let [Message::Setting(_, Edit::Choice(value)) | Message::Output(_, _, Edit::Choice(value))] =
+        messages
+    else {
+        panic!("not one choice: {messages:?}");
+    };
+    value.clone()
+}
+
+/// A setting's control alone in a window, its list at the top.
+fn control_alone<'app>(
+    app: &'app App,
+    setting: Setting,
+    current: Option<&str>,
+) -> Simulator<'app, Message> {
+    let spec = setting.spec();
+    Simulator::with_size(
+        crate::settings(),
+        TALL,
+        crate::controls::control(
+            app,
+            &DraftKey::Setting(setting),
+            spec.kind,
+            spec.default.as_str(),
+            niri_center::settings::Reading::Value(current.map(str::to_string)),
+            move |edit| Message::Setting(setting, edit),
+        ),
+    )
+}
+
+#[test]
+fn choosing_an_option_writes_its_value_not_its_label() {
+    let (_dir, app) = loaded_app(UI_FIXTURE);
+    let top_of_window = iced::Point::new(100.0, PICK_HEIGHT / 2.0);
+    let choose = |setting: Setting, current: Option<&str>, place: usize| {
+        chosen(&pick(
+            control_alone(&app, setting, current),
+            top_of_window,
+            place,
+        ))
+    };
+    // "Stacked", then "As tabs"
+    assert_eq!(
+        choose(Setting::LayoutDefaultColumnDisplay, None, 2).as_deref(),
+        Some("tabbed")
+    );
+    // "On", then "Off"
+    assert_eq!(
+        choose(Setting::LayoutShadowDrawBehindWindow, None, 1).as_deref(),
+        Some("true")
+    );
+    // "DP-1 (Dell Inc. U2720Q)"
+    assert_eq!(
+        choose(Setting::InputTabletMapToOutput, None, 1).as_deref(),
+        Some("DP-1")
+    );
+    // "The app decides", then "1/3"
+    assert_eq!(
+        choose(Setting::LayoutDefaultColumnWidth, None, 1).as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        choose(Setting::LayoutDefaultColumnWidth, None, 2).as_deref(),
+        Some("proportion 0.33333")
+    );
+    // a value no preset has comes last, reading "800 px"
+    assert_eq!(
+        choose(Setting::LayoutDefaultColumnWidth, Some("fixed 800"), 5).as_deref(),
+        Some("fixed 800")
+    );
+}
+
+#[test]
+fn choosing_a_display_mode_or_scale_writes_its_value_not_its_label() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Displays);
+    // a row's control is centred on the words beside it, first to last line
+    let list_in = |first_line: &str, last_line: &str| {
+        let mut ui = ui(&app, TALL);
+        let control_left = ui.find("1707").unwrap().bounds().x;
+        let top = ui.find(first_line).unwrap().bounds().y;
+        let last = ui.find(last_line).unwrap().bounds();
+        iced::Point::new(control_left + 20.0, (top + last.y + last.height) / 2.0)
+    };
+    let mode = list_in("Resolution and refresh rate", "Resolution and refresh rate");
+    assert_eq!(
+        chosen(&pick(ui(&app, TALL), mode, 1)).as_deref(),
+        Some("3840x2160@59.997")
+    );
+    let scale = list_in("Scale", "The desktop on it is 2560 × 1440 logical pixels.");
+    assert_eq!(
+        chosen(&pick(ui(&app, TALL), scale, 3)).as_deref(),
+        Some("1.5")
+    );
+}

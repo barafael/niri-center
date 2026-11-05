@@ -9,7 +9,7 @@ use niri_center::settings::{self, Coordinate, DraftKey, Edit, OutputSetting};
 use num_traits::ToPrimitive;
 
 use crate::app::{App, error, info, room};
-use crate::controls::{self, small};
+use crate::controls::{self, ChoiceOption, small};
 use crate::message::Message as AppMessage;
 use crate::monitors::DroppedMonitor;
 use crate::rows;
@@ -345,7 +345,10 @@ fn output_rows<'app>(
             output
                 .modes
                 .iter()
-                .map(|mode| (mode.value.clone(), mode.choice.clone()))
+                .map(|mode| ChoiceOption {
+                    value: mode.value.clone(),
+                    label: mode.choice.clone(),
+                })
                 .collect(),
             store.setting(&chain, "mode").as_deref(),
             &preferred.map_or_else(
@@ -385,7 +388,10 @@ fn output_rows<'app>(
                     .iter()
                     .map(|scale| {
                         let factor = scale.parse::<f64>().unwrap_or(1.0);
-                        ((*scale).to_string(), percent(factor))
+                        ChoiceOption {
+                            value: (*scale).to_string(),
+                            label: percent(factor),
+                        }
                     })
                     .collect(),
                 picked.as_deref().or(current.as_deref()),
