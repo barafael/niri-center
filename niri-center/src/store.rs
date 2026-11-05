@@ -27,7 +27,7 @@ use crate::snapshot::SnapshotFile;
 
 mod engine;
 use engine::indentation;
-pub use engine::{Block, Override};
+pub use engine::{Block, Override, SizeEntry};
 
 const LAYOUT: [Block; 1] = [Block::named("layout")];
 const TOUCHPAD: [Block; 2] = [Block::named("input"), Block::named("touchpad")];

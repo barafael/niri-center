@@ -3983,3 +3983,51 @@ fn choosing_a_display_mode_or_scale_writes_its_value_not_its_label() {
         Some("1.5")
     );
 }
+
+/// The text `messages` draft: one draft, or the test fails.
+fn drafted(messages: &[Message]) -> &str {
+    let [Message::Setting(_, Edit::Draft(text))] = messages else {
+        panic!("not one draft: {messages:?}");
+    };
+    text
+}
+
+#[test]
+fn a_size_typed_in_the_list_changes_that_entry_value() {
+    let (_dir, app) = loaded_app(UI_FIXTURE);
+    let mut ui = control_alone(&app, Setting::LayoutPresetColumnWidths, None);
+    ui.click("0.5").unwrap();
+    ui.typewrite("5");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        drafted(&messages),
+        "proportion 0.33333; proportion 0.55; proportion 0.66667"
+    );
+}
+
+#[test]
+fn switching_a_size_to_fixed_pixels_converts_it_against_the_screen() {
+    let (_dir, app) = loaded_app(UI_FIXTURE);
+    let mut ui = control_alone(&app, Setting::LayoutPresetColumnWidths, None);
+    let field = ui.find("0.5").unwrap().bounds();
+    // the kind's list sits left of the value, in the same row
+    let list = iced::Point::new(field.x - 100.0, field.center_y());
+    // "Part of the screen", then "Fixed pixels": this list has no default
+    let messages = pick(ui, list, 1);
+    assert_eq!(
+        drafted(&messages),
+        "proportion 0.33333; fixed 1280; proportion 0.66667"
+    );
+}
+
+#[test]
+fn adding_a_fixed_size_writes_half_the_screen_in_pixels() {
+    let (_dir, app) = loaded_app(UI_FIXTURE);
+    let mut ui = control_alone(&app, Setting::LayoutPresetColumnWidths, None);
+    ui.click("Fixed size").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        drafted(&messages),
+        "proportion 0.33333; proportion 0.5; proportion 0.66667; fixed 1280"
+    );
+}

@@ -13,7 +13,7 @@ use common::*;
 use std::fs;
 use std::path::Path;
 
-use niri_center::store::{Block, Store};
+use niri_center::store::{Block, SizeEntry, Store};
 use niri_center::validate;
 
 const LAYOUT: [Block; 1] = [Block::named("layout")];
@@ -203,9 +203,12 @@ fn values_with_props_are_replaced_without_touching_the_rest_of_the_line() {
     );
 }
 
-fn entries(list: &[(&str, &str)]) -> Vec<(String, String)> {
+fn entries(list: &[(&str, &str)]) -> Vec<SizeEntry> {
     list.iter()
-        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .map(|(name, value)| SizeEntry {
+            name: (*name).to_string(),
+            value: (*value).to_string(),
+        })
         .collect()
 }
 

@@ -19,6 +19,7 @@ use niri_center::settings::{
     Axis, Edit, Kind, NIRI_DEFAULT, NO_FILE, OnOff, Reading, join_sizes, size_label, sizes,
 };
 use niri_center::settings::{default_label, default_placeholder};
+use niri_center::store::SizeEntry;
 use niri_center::words::{
     comma_list, expand_strftime, join_path, short_fraction, short_number, split_path,
 };
@@ -650,10 +651,10 @@ fn size_list(
         Axis::Height => screen.height,
     };
     let mut list = column![SizesPreview::canvas(&entries, axis, screen)].spacing(6);
-    for (index, (name, value)) in entries.iter().enumerate() {
+    for (index, SizeEntry { name, value }) in entries.iter().enumerate() {
         let with = {
             let entries = entries.clone();
-            move |entry: (String, String)| {
+            move |entry: SizeEntry| {
                 let mut next = entries.clone();
                 if let Some(slot) = next.get_mut(index) {
                     *slot = entry;
@@ -690,14 +691,22 @@ fn size_list(
                     }
                     _ => value.clone(),
                 };
-                make(Edit::Draft(with((picked, converted))))
+                make(Edit::Draft(with(SizeEntry {
+                    name: picked,
+                    value: converted,
+                })))
             }
         };
         let typed = {
             let make = make.clone();
             let name = name.clone();
             let with = with.clone();
-            move |input: String| make(Edit::Draft(with((name.clone(), input))))
+            move |input: String| {
+                make(Edit::Draft(with(SizeEntry {
+                    name: name.clone(),
+                    value: input,
+                })))
+            }
         };
         let mut remaining = entries.clone();
         remaining.remove(index);
@@ -730,11 +739,17 @@ fn size_list(
         ("Full", "1"),
     ] {
         let mut next = entries.clone();
-        next.push(("proportion".to_string(), value.to_string()));
+        next.push(SizeEntry {
+            name: "proportion".to_string(),
+            value: value.to_string(),
+        });
         add = add.push(small(label, make(Edit::Draft(join_sizes(&next)))));
     }
     let mut fixed = entries.clone();
-    fixed.push(("fixed".to_string(), format!("{}", (extent / 2.0).round())));
+    fixed.push(SizeEntry {
+        name: "fixed".to_string(),
+        value: format!("{}", (extent / 2.0).round()),
+    });
     add = add.push(small("Fixed size", make(Edit::Draft(join_sizes(&fixed)))));
     if set {
         add = add
@@ -754,7 +769,7 @@ fn default_size(
         let entries = sizes(text);
         entries.first().map_or_else(
             || "The app decides".to_string(),
-            |(name, value)| size_label(name, value),
+            |entry| size_label(&entry.name, &entry.value),
         )
     };
     let presets = state
@@ -777,7 +792,7 @@ fn default_size(
         value: String::new(),
         label: "The app decides".to_string(),
     }];
-    for (name, value) in presets {
+    for SizeEntry { name, value } in presets {
         let entry = format!("{name} {value}");
         options.push(ChoiceOption {
             value: entry.clone(),
@@ -1079,18 +1094,19 @@ pub struct SizesPreview {
 }
 
 impl SizesPreview {
-    fn canvas(
-        entries: &[(String, String)],
-        axis: Axis,
-        screen: Size,
-    ) -> canvas::Canvas<Self, Message> {
+    fn canvas(entries: &[SizeEntry], axis: Axis, screen: Size) -> canvas::Canvas<Self, Message> {
         let extent = match axis {
             Axis::Width => screen.width,
             Axis::Height => screen.height,
         };
         let bars = entries
             .iter()
-            .map(|(name, value)| (fraction(name, value, extent), size_label(name, value)))
+            .map(|entry| {
+                (
+                    fraction(&entry.name, &entry.value, extent),
+                    size_label(&entry.name, &entry.value),
+                )
+            })
             .collect();
         let height = match axis {
             Axis::Width => 24.0f32.mul_add(entries.len().max(1) as f32, 16.0),
