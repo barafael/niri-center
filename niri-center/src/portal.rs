@@ -45,10 +45,11 @@ pub enum ChooseError {
 #[cfg(not(target_arch = "wasm32"))]
 mod bus {
     use std::collections::HashMap;
+    use std::future::ready;
 
-    use futures_util::StreamExt;
+    use futures_util::stream::{self, Stream, StreamExt};
     use zbus::proxy::{Builder, CacheProperties, SignalStream};
-    use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant};
+    use zbus::{Connection, Message, OwnedObjectPath, OwnedVariant, Proxy, Variant};
 
     use super::{Appearance, Scheme};
 
@@ -142,48 +143,57 @@ mod bus {
         number(&value)
     }
 
-    /// `contrast`: "0: No preference (normal contrast), 1: Higher contrast".
-    pub async fn watch<Handed: Future<Output = bool>>(mut each: impl FnMut(Appearance) -> Handed) {
-        let Ok(connection) = Connection::session().await else {
-            return;
-        };
-        let Ok(settings) = proxy(&connection, DESKTOP, Interface::Settings).await else {
-            return;
-        };
+    /// What setting `key` holding `value` asks for; `None` for the settings
+    /// the app does not follow. `contrast`: "0: No preference (normal
+    /// contrast), 1: Higher contrast".
+    fn asked_for(key: &str, value: &Variant<'_>) -> Option<Appearance> {
+        let value = number(value)?;
+        match key {
+            "color-scheme" => Some(Appearance::Scheme(scheme_of(value))),
+            "contrast" => Some(Appearance::HighContrast(value == 1)),
+            _ => None,
+        }
+    }
+
+    /// What a `SettingChanged` signal asks for.
+    fn changed(signal: &Message) -> Option<Appearance> {
+        let (_, key, value) = signal
+            .body()
+            .deserialize::<(String, String, OwnedVariant)>()
+            .ok()?;
+        asked_for(&key, &value)
+    }
+
+    /// What the desktop asks for now, then its changes; `None` without a bus.
+    async fn current_then_changes() -> Option<impl Stream<Item = Appearance>> {
+        let connection = Connection::session().await.ok()?;
+        let settings = proxy(&connection, DESKTOP, Interface::Settings)
+            .await
+            .ok()?;
         // listening before the first read, so a change during it is not lost
         // and cannot be overwritten by what the read saw
-        let Ok(mut changes) = settings
+        let changes = settings
             .receive_signal_with_args("SettingChanged", &[(0, APPEARANCE)])
             .await
-        else {
-            return;
-        };
+            .ok()?;
         let scheme = appearance(&settings, "color-scheme")
             .await
             .map_or(Scheme::NoPreference, scheme_of);
-        if !each(Appearance::Scheme(scheme)).await {
-            return;
-        }
         let high_contrast = appearance(&settings, "contrast").await == Some(1);
-        if !each(Appearance::HighContrast(high_contrast)).await {
-            return;
-        }
-        while let Some(change) = changes.next().await {
-            let Ok((_, key, value)) = change
-                .body()
-                .deserialize::<(String, String, OwnedVariant)>()
-            else {
-                continue;
-            };
-            let appearance = match (key.as_str(), number(&value)) {
-                ("color-scheme", Some(value)) => Appearance::Scheme(scheme_of(value)),
-                ("contrast", Some(value)) => Appearance::HighContrast(value == 1),
-                _ => continue,
-            };
-            if !each(appearance).await {
-                break;
-            }
-        }
+        let current = [
+            Appearance::Scheme(scheme),
+            Appearance::HighContrast(high_contrast),
+        ];
+        Some(stream::iter(current).chain(changes.filter_map(|signal| ready(changed(&signal)))))
+    }
+
+    /// The desktop's color scheme and contrast (GNOME's high-contrast switch
+    /// sets it), then every later change of them. Without a portal's answer:
+    /// no preference and no more contrast; without a session bus, nothing.
+    pub fn appearances() -> impl Stream<Item = Appearance> {
+        stream::once(current_then_changes())
+            .filter_map(ready)
+            .flatten()
     }
 
     /// The `Response` signals of the request object at `request_path`.
@@ -283,6 +293,33 @@ mod bus {
         }
 
         #[test]
+        fn a_setting_asks_for_what_the_portal_says_its_number_means() {
+            let asked = |key, value: u32| asked_for(key, &Variant::from(value));
+            assert_eq!(
+                asked("color-scheme", 1),
+                Some(Appearance::Scheme(Scheme::Dark))
+            );
+            assert_eq!(asked("contrast", 1), Some(Appearance::HighContrast(true)));
+            assert_eq!(asked("contrast", 0), Some(Appearance::HighContrast(false)));
+            assert_eq!(asked("accent-color", 1), None);
+            assert_eq!(asked_for("contrast", &Variant::from("high")), None);
+        }
+
+        #[test]
+        fn a_setting_changed_signal_is_read_by_its_documented_signature() {
+            let signal = |key: &str| {
+                Message::signal(DESKTOP, Interface::Settings.as_str(), "SettingChanged")
+                    .build(&(APPEARANCE, key, Variant::from(2u32)))
+                    .expect("a signal this simple builds")
+            };
+            assert_eq!(
+                changed(&signal("color-scheme")),
+                Some(Appearance::Scheme(Scheme::Light))
+            );
+            assert_eq!(changed(&signal("accent-color")), None);
+        }
+
+        #[test]
         fn color_scheme_numbers_are_the_portals() {
             assert_eq!(scheme_of(0), Scheme::NoPreference);
             assert_eq!(scheme_of(1), Scheme::Dark);
@@ -352,22 +389,13 @@ pub async fn high_contrast() -> bool {
         .is_some_and(|query| query.matches())
 }
 
-/// Hand the desktop's color scheme and contrast (GNOME's high-contrast switch
-/// sets it) to `each`, then every later change of them, until `each` says
-/// stop. Without a portal's answer: no preference and no more contrast; without
-/// a session bus, nothing.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn watch_appearance<Handed: Future<Output = bool>>(
-    each: impl FnMut(Appearance) -> Handed,
-) {
-    bus::watch(each).await;
-}
+pub use bus::appearances;
 
 /// The browser's preferences are read once, at start.
 #[cfg(target_arch = "wasm32")]
-pub async fn watch_appearance<Handed: Future<Output = bool>>(
-    _each: impl FnMut(Appearance) -> Handed,
-) {
+pub fn appearances() -> impl futures_util::Stream<Item = Appearance> {
+    futures_util::stream::empty()
 }
 
 #[cfg(test)]

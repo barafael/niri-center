@@ -2,9 +2,8 @@
 //! its own keys and the window's size. niri's events come from the niri
 //! actor.
 
-use iced::futures::SinkExt;
-use iced::futures::channel::mpsc::Sender;
-use iced::{Subscription, stream, window};
+use iced::futures::StreamExt;
+use iced::{Subscription, window};
 use niri_center::page::Page;
 use niri_center::portal::{self, Appearance};
 
@@ -33,25 +32,18 @@ fn app_events(
     }
 }
 
-/// Send one thing the desktop asks for; `false` once the channel has closed.
-async fn send_appearance(mut sender: Sender<Message>, appearance: Appearance) -> bool {
-    let message = match appearance {
+/// The message for one thing the desktop asks for.
+fn appearance_message(appearance: Appearance) -> Message {
+    match appearance {
         Appearance::Scheme(scheme) => Message::ModeLoaded(theme::mode(scheme)),
         Appearance::HighContrast(high) => Message::ContrastLoaded(high),
-    };
-    // waits while the channel is full: only a closed one is an end
-    sender.send(message).await.is_ok()
-}
-
-/// Send what the desktop asks for, until the channel closes.
-async fn follow_appearance(sender: Sender<Message>) {
-    portal::watch_appearance(|appearance| send_appearance(sender.clone(), appearance)).await;
+    }
 }
 
 /// The desktop's color scheme and contrast, then every later change of them.
 fn appearance_changes() -> Subscription<Message> {
     Subscription::run_with("desktop-appearance", |_| {
-        stream::channel(4, follow_appearance)
+        portal::appearances().map(appearance_message)
     })
 }
 
