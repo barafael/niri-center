@@ -2630,6 +2630,34 @@ fn a_rule_draft_that_cannot_go_in_says_why() {
 }
 
 #[test]
+fn a_duration_it_cannot_read_is_said_under_the_editor() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    goto(&mut app, Page::Animations);
+    apply(
+        &mut app,
+        [
+            Message::Animations(animations::Message::Spring(false)),
+            Message::Animations(animations::Message::Duration("soon".into())),
+        ],
+    );
+    assert!(shows(
+        &app,
+        TALL,
+        "Enter a duration from 1 to 10000 milliseconds."
+    ));
+}
+
+#[test]
+fn an_animations_edit_says_what_happened_or_what_went_wrong() {
+    let done = crate::app::said(Ok("Done.".into())).unwrap();
+    assert_eq!(done.text, "Done.");
+    assert!(!done.error);
+    let failed = crate::app::said(Err(niri_center::store::StoreError::NoBinds)).unwrap();
+    assert_eq!(failed.text, "no `binds` block in the loaded config set");
+    assert!(failed.error);
+}
+
+#[test]
 fn the_only_display_that_is_on_cannot_be_turned_off() {
     let (_dir, mut app) = loaded_app(UI_FIXTURE);
     app.outputs.retain(|output| output.name == "eDP-1");
