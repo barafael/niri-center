@@ -94,7 +94,7 @@ pub enum Message {
     /// Add the picked window's title to the rule being made.
     TitleFromWindow,
     PickWindow,
-    WindowPicked(Result<Option<(String, String)>, String>),
+    WindowPicked(Result<Option<(String, String)>, niri::NiriError>),
     Add,
     On(usize, bool),
     Remove(usize),

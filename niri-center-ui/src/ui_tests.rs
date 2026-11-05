@@ -22,7 +22,7 @@ use niri_center::session::{SaveState, SaveWhen};
 use niri_center::settings::{Coordinate, DraftKey, OutputSetting, Setting};
 use niri_center::store::{RuleProperty, Store, TextMatch};
 
-use niri_center::niri::{OpenWindow, Running};
+use niri_center::niri::{NiriError, OpenWindow, Running};
 use niri_center::outputs::{MonitorInfo, OutputInfo};
 use niri_center::page::Page;
 use niri_center::session::{Platform, Problem, TRIAL_SECONDS, Version};
@@ -2655,6 +2655,61 @@ fn an_animations_edit_says_what_happened_or_what_went_wrong() {
     let failed = crate::app::said(Err(niri_center::store::StoreError::NoBinds)).unwrap();
     assert_eq!(failed.text, "no `binds` block in the loaded config set");
     assert!(failed.error);
+}
+
+#[test]
+fn what_niri_did_not_do_is_said_with_its_reason() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    let refused = || NiriError::Reply("no such window".into());
+    for (message, said) in [
+        (
+            Message::ScreenColor(Err(refused())),
+            "niri could not pick a color: niri replied with an error: no such window",
+        ),
+        (
+            Message::LinkOpened(Err(refused())),
+            "Could not open the page: niri replied with an error: no such window",
+        ),
+        (
+            Message::PoppedOut(Err(refused())),
+            "niri could not open the window: niri replied with an error: no such window",
+        ),
+        (
+            Message::WindowFocused(Err(refused())),
+            "niri did not switch to the window: niri replied with an error: no such window",
+        ),
+        (
+            Message::Rules(rules::Message::WindowPicked(Err(refused()))),
+            "Could not ask niri for a window: niri replied with an error: no such window",
+        ),
+        (
+            Message::LiveError(NiriError::NoEventStream),
+            "Event stream: could not open niri's event stream. Is niri-center running under niri?",
+        ),
+    ] {
+        apply(&mut app, [message]);
+        assert_eq!(status_text(&app), said);
+    }
+}
+
+#[test]
+fn a_niri_that_does_not_answer_is_said_on_its_pages() {
+    let (_dir, mut app) = loaded_app(UI_FIXTURE);
+    let gone = || NiriError::Transport("socket gone".into());
+    apply(&mut app, [Message::OutputsLoaded(Err(gone()))]);
+    goto(&mut app, Page::Displays);
+    assert!(shows(
+        &app,
+        TALL,
+        "niri did not answer: ipc transport error: socket gone"
+    ));
+    apply(&mut app, [Message::RunningLoaded(Err(gone()))]);
+    goto(&mut app, Page::Windows);
+    assert!(shows(
+        &app,
+        TALL,
+        "niri did not answer: ipc transport error: socket gone"
+    ));
 }
 
 #[test]

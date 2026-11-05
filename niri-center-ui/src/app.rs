@@ -9,7 +9,7 @@ use niri_center::color::GradientEnd;
 use niri_center::disk::actor::Command;
 use niri_center::forms::{BindingForm, RuleDraft, follow};
 use niri_center::motion::Played;
-use niri_center::niri::{self, OpenWindow, Running};
+use niri_center::niri::{self, NiriError, OpenWindow, Running};
 use niri_center::outputs::OutputInfo;
 use niri_center::page::Page;
 use niri_center::session::{Platform, Session};
@@ -151,7 +151,7 @@ pub struct App {
     pub outputs: Vec<OutputInfo>,
     pub displays: pages::displays::State,
     pub running: Option<Running>,
-    pub running_error: Option<String>,
+    pub running_error: Option<NiriError>,
     pub live_events: VecDeque<(niri_center::niri::EventKind, String)>,
     // files
     pub files: pages::files::State,

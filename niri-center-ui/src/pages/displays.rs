@@ -22,7 +22,7 @@ pub struct State {
     pub selected: Option<String>,
     pub monitors: Vec<(String, MonitorInfo)>,
     /// Why niri could not say which displays there are.
-    pub error: Option<String>,
+    pub error: Option<niri::NiriError>,
 }
 
 /// What the page's controls ask for.
